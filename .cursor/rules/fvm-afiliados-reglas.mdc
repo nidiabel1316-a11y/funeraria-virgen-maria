@@ -1,0 +1,14 @@
+---
+description: Reglas fijas Funeraria Virgen María — afiliados, cédula única, migraciones
+alwaysApply: true
+---
+
+# Funeraria Virgen María — reglas de negocio (afiliados)
+
+- **Un documento (cédula) = una cuenta.** El registro (`POST /auth/register`) rechaza duplicados de `doc_number` y de `email` con **409** y mensajes distintos (cédula vs correo). No quitar esas comprobaciones separadas.
+- **Base de datos:** `doc_number` debe ser `UNIQUE` (`schema.sql`). Bases legacy: ejecutar `backend/db/ensure_unique_doc_number.sql` si hace falta.
+- **Estabilidad:** Mantener migraciones obligatorias documentadas en `backend/README.md` (`migrate_commission_lines.sql`, `migrate_payment_affiliation.sql`, etc.). Las comisiones por inscripción se aplican al confirmar pago de afiliación, no solo al alta.
+- **Sesión:** JWT con `sub` = UUID del usuario; `/auth/me` debe validar coherencia con la fila en BD.
+- **Documentación de producto:** `docs/COMPORTAMIENTO_AFILIADOS.md` resume el comportamiento esperado.
+
+Al cambiar registro o `users`, no reintroducir registros duplicados por cédula ni debilitar mensajes 409.

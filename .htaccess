@@ -1,0 +1,13 @@
+# SPA: las rutas que no son archivos reales se redirigen a index.html.
+# Eso incluye /api/... — el front no debe usar FVM_API_BASE apuntando a este
+# mismo dominio salvo que en Hostinger tengas aplicación Node/proxy que atienda /api.
+# Por defecto el index.html usa la API en Render (funerariavirgenma.onrender.com/api).
+
+DirectoryIndex index.html index.htm
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase /
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.html [L]
+</IfModule>

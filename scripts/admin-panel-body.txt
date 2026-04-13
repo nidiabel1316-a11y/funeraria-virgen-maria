@@ -1,0 +1,654 @@
+({go})=>{
+const AD={sb:"#1F1F1F",gold:"#C9A66B",maroon:"#801538",main:"#F0F0F2",card:"#FFFFFF",muted:"#6B7280",border:"#E5E7EB"};
+const [usr,sUsr]=useState("");
+const [pw,sPw]=useState("");
+const [err,sErr]=useState("");
+const [tok,setTok]=useState(()=>localStorage.getItem("fvm_admin_tok"));
+const [view,sView]=useState("dashboard");
+const [rows,setRows]=useState(null);
+const [q,setQ]=useState("");
+const [ld,setLd]=useState(false);
+const [stats,setStats]=useState(null);
+const [statsLd,setStatsLd]=useState(false);
+const [comMs,setComMs]=useState(null);
+const [comLd,setComLd]=useState(false);
+const [selId,setSelId]=useState(null);
+const [netD,setNetD]=useState(null);
+const [netLd,setNetLd]=useState(false);
+const [toast,setToast]=useState(null);
+const curMonth=()=>{const t=new Date();return t.getFullYear()+"-"+String(t.getMonth()+1).padStart(2,"0");};
+const [comMonth,setComMonth]=useState(curMonth);
+const [affBy,setAffBy]=useState(null);
+const [affByLd,setAffByLd]=useState(false);
+const [affShowAll,setAffShowAll]=useState(false);
+const [repSum,setRepSum]=useState(null);
+const [repLd,setRepLd]=useState(false);
+const [closeM,setCloseM]=useState("");
+const [contrReq,setContrReq]=useState(null);
+const [contrLd,setContrLd]=useState(false);
+const [disModal,setDisModal]=useState(null);
+const [disAmt,setDisAmt]=useState("");
+const [disNote,setDisNote]=useState("");
+const [affDetail,setAffDetail]=useState(null);
+const [affDetailLd,setAffDetailLd]=useState(false);
+const [repExM,setRepExM]=useState(()=>curMonth());
+const [repExY,setRepExY]=useState(()=>String(new Date().getFullYear()));
+
+const adminApi=async(path,opt={})=>{
+  const h={"Content-Type":"application/json",...opt.headers};
+  if(tok)h["X-Admin-Token"]=tok;
+  const r=await fetch(FVM_API+path,{...opt,headers:h});
+  let d={};
+  try{d=await r.json()}catch(e){}
+  if(!r.ok)throw new Error(d.error||("Error "+r.status));
+  return d;
+};
+
+useEffect(()=>{
+  if(!tok){setRows(null);setStats(null);return;}
+  let alive=true;
+  setLd(true);
+  const tmr=setTimeout(async()=>{
+    try{
+      const url=(q.trim().length>=2)?"/admin/affiliates?q="+encodeURIComponent(q.trim()):"/admin/affiliates";
+      const a=await adminApi(url);
+      if(alive)setRows(a);
+    }catch(e){if(alive)sErr(e.message)}
+    finally{if(alive)setLd(false)}
+  },200);
+  return()=>{alive=false;clearTimeout(tmr)};
+},[tok,q]);
+
+useEffect(()=>{
+  if(!tok||view!=="dashboard")return;
+  let ok=true;
+  setStatsLd(true);
+  (async()=>{
+    try{
+      const s=await adminApi("/admin/stats");
+      if(ok)setStats(s);
+    }catch(e){if(ok)setToast({m:e.message,tp:"err"})}
+    finally{if(ok)setStatsLd(false)}
+  })();
+  return()=>{ok=false};
+},[tok,view]);
+
+useEffect(()=>{
+  if(!tok||view!=="comisiones")return;
+  let ok=true;
+  setComLd(true);
+  setAffByLd(true);
+  (async()=>{
+    try{
+      const c=await adminApi("/admin/commissions/summary");
+      if(ok)setComMs(c.months||[]);
+    }catch(e){if(ok)setComMs([])}
+    finally{if(ok)setComLd(false)}
+  })();
+  (async()=>{
+    try{
+      const u="/admin/commissions/by-affiliate?month="+encodeURIComponent(comMonth)+(affShowAll?"&all=1":"");
+      const a=await adminApi(u);
+      if(ok)setAffBy(a.affiliates||[]);
+    }catch(e){if(ok){setAffBy([]);setToast({m:e.message,tp:"err"})}}
+    finally{if(ok)setAffByLd(false)}
+  })();
+  return()=>{ok=false};
+},[tok,view,comMonth,affShowAll]);
+
+useEffect(()=>{
+  if(!tok||!selId){setNetD(null);setAffDetail(null);return;}
+  let ok=true;
+  setNetLd(true);
+  setAffDetailLd(true);
+  (async()=>{
+    try{
+      const [n,d]=await Promise.all([
+        adminApi("/admin/affiliates/"+selId+"/network"),
+        adminApi("/admin/affiliates/"+selId)
+      ]);
+      if(ok){setNetD(n);setAffDetail(d);}
+    }catch(e){if(ok){setNetD(null);setAffDetail(null);setToast({m:e.message,tp:"err"})}}
+    finally{if(ok){setNetLd(false);setAffDetailLd(false)}}
+  })();
+  return()=>{ok=false};
+},[tok,selId]);
+
+useEffect(()=>{
+  if(!tok||view!=="reportes")return;
+  let ok=true;
+  setRepLd(true);
+  (async()=>{
+    try{
+      const r=await adminApi("/admin/reports/summary");
+      if(ok)setRepSum(r);
+    }catch(e){if(ok)setToast({m:e.message,tp:"err"})}
+    finally{if(ok)setRepLd(false)}
+  })();
+  return()=>{ok=false};
+},[tok,view]);
+
+useEffect(()=>{
+  if(!tok||view!=="contratos")return;
+  let ok=true;
+  setContrLd(true);
+  (async()=>{
+    try{
+      const r=await adminApi("/admin/contract-requests");
+      if(ok)setContrReq(r.requests||[]);
+    }catch(e){if(ok)setContrReq([])}
+    finally{if(ok)setContrLd(false)}
+  })();
+  return()=>{ok=false};
+},[tok,view]);
+
+const login=async()=>{
+  sErr("");
+  try{
+    const r=await adminApi("/admin/login",{method:"POST",body:JSON.stringify({user:usr,password:pw})});
+    localStorage.setItem("fvm_admin_tok",r.token);
+    setTok(r.token);
+    sView("dashboard");
+  }catch(e){sErr(e.message||"Error")}
+};
+const out=()=>{
+  localStorage.removeItem("fvm_admin_tok");
+  setTok(null);
+  setRows(null);
+  setStats(null);
+  setSelId(null);
+  setNetD(null);
+  setRepSum(null);
+  setAffBy(null);
+  setContrReq(null);
+  setDisModal(null);
+  setAffDetail(null);
+  sErr("");
+  sView("dashboard");
+};
+
+const navItem=(id,label,ic)=>(
+  <div key={id} onClick={()=>sView(id)} style={{
+    display:"flex",alignItems:"center",gap:10,padding:"12px 14px",borderRadius:10,cursor:"pointer",
+    marginBottom:4,
+    background:view===id?"rgba(201,166,107,.18)":"transparent",
+    color:view===id?AD.gold:"rgba(255,255,255,.82)",
+    fontWeight:view===id?600:500,fontSize:14
+  }}>
+    <span style={{fontSize:18}}>{ic}</span>
+    <span>{label}</span>
+  </div>
+);
+
+const pct=(a,t)=>t>0?Math.round((a/t)*100):0;
+const H=fvmBuildHierarchyFromNetwork;
+const fvmCsvEsc=(v)=>{const s=v==null?"":String(v);return /[",\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;};
+const fvmDlCsv=(fn,rows)=>{const bom="\uFEFF";const t=rows.map(r=>r.map(fvmCsvEsc).join(",")).join("\n");const b=new Blob([bom+t],{type:"text/csv;charset=utf-8"});const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download=fn;a.click();URL.revokeObjectURL(a.href);};
+
+if(!tok){
+  return (
+    <div style={{minHeight:"100vh",background:AD.sb,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{width:"100%",maxWidth:420,background:"#2a2a2a",borderRadius:16,padding:32,border:"1px solid rgba(201,166,107,.25)"}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20}}>
+          <div style={{width:48,height:48,borderRadius:"50%",background:"#fff",display:"flex",alignItems:"center",justifyContent:"center"}}><Logo s={32}/></div>
+          <div><div style={{color:AD.gold,fontSize:11,letterSpacing:1}}>Admin Panel</div><div style={{color:"#fff",fontSize:16,fontWeight:700}}>Funeraria VM</div></div>
+        </div>
+        <p style={{color:"rgba(255,255,255,.65)",fontSize:12,marginBottom:16,lineHeight:1.5}}>Credenciales: variables ADMIN_USER y ADMIN_PASSWORD en el servidor (por defecto admin / admin123).</p>
+        <input className="inp" value={usr} onChange={e=>sUsr(e.target.value)} placeholder="Usuario" style={{marginBottom:10,background:"#1a1a1a",border:"1px solid #444",color:"#fff"}}/>
+        <input className="inp" type="password" value={pw} onChange={e=>sPw(e.target.value)} placeholder="Contraseña" style={{marginBottom:14,background:"#1a1a1a",border:"1px solid #444",color:"#fff"}} onKeyDown={e=>e.key==="Enter"&&login()}/>
+        {err&&<div className="em" style={{marginBottom:10}}>{err}</div>}
+        <button onClick={login} style={{width:"100%",padding:14,borderRadius:10,border:"none",background:AD.maroon,color:"#fff",fontWeight:700,cursor:"pointer",fontSize:14}}>Entrar</button>
+        <button onClick={()=>go("landing")} style={{marginTop:16,width:"100%",background:"none",border:"none",color:"rgba(255,255,255,.5)",cursor:"pointer",fontSize:12}}>← Volver al sitio</button>
+      </div>
+    </div>
+  );
+}
+
+const total=stats?stats.totalUsers:0;
+const aff=stats?stats.affiliatedUsers:0;
+const elite=stats?stats.planElite:0;
+const pre=stats?stats.planPremium:0;
+const pla=stats?stats.planPlatinum:0;
+const planSum=elite+pre+pla||1;
+
+return (
+  <div style={{display:"flex",minHeight:"100vh",fontFamily:"'Lato',sans-serif"}}>
+    {toast&&<div style={{position:"fixed",bottom:16,right:16,zIndex:9999,padding:"12px 18px",borderRadius:8,background:toast.tp==="err"?"#B91C1C":"#15803D",color:"#fff",fontSize:13,boxShadow:"0 8px 24px rgba(0,0,0,.2)",cursor:"pointer"}} onClick={()=>setToast(null)}>{toast.m}</div>}
+    {disModal&&(
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:10001,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={()=>setDisModal(null)}>
+        <div style={{background:AD.card,borderRadius:12,maxWidth:440,width:"100%",padding:22,border:"1px solid "+AD.border}} onClick={e=>e.stopPropagation()}>
+          <h3 style={{margin:"0 0 8px",color:AD.maroon,fontSize:16}}>Autorizar desembolso</h3>
+          <p style={{margin:"0 0 12px",fontSize:12,color:AD.muted}}>{disModal.fullName}</p>
+          <p style={{fontSize:13,marginBottom:8}}>Saldo disponible: <b style={{color:AD.maroon}}>{fmt(disModal.availableBalancePesos||0)}</b></p>
+          {!disModal.payment?.receivesCommission&&<p style={{color:"#B91C1C",fontSize:12}}>No al día — no se puede autorizar.</p>}
+          <label style={{fontSize:11,display:"block",marginBottom:4}}>Monto (COP)</label>
+          <input className="inp" value={disAmt} onChange={e=>setDisAmt(e.target.value)} placeholder="Ej. 150000" style={{marginBottom:10,width:"100%"}}/>
+          <label style={{fontSize:11,display:"block",marginBottom:4}}>Nota (opcional)</label>
+          <input className="inp" value={disNote} onChange={e=>setDisNote(e.target.value)} style={{marginBottom:14,width:"100%"}}/>
+          <div style={{display:"flex",gap:10}}>
+            <button type="button" className="bp" style={{flex:1}} disabled={!disModal.payment?.receivesCommission} onClick={async()=>{
+              try{
+                await adminApi("/admin/disbursements/authorize",{method:"POST",body:JSON.stringify({userId:disModal.id,amountPesos:Number(String(disAmt).replace(/\D/g,"")||0),note:disNote||null,periodMonth:comMonth})});
+                setToast({m:"Desembolso autorizado",tp:"ok"});setDisModal(null);
+              }catch(e){setToast({m:e.message,tp:"err"});}
+            }}>Autorizar</button>
+            <button type="button" className="bo" onClick={()=>setDisModal(null)}>Cerrar</button>
+          </div>
+          {disModal.disbursements&&disModal.disbursements.length>0&&<div style={{marginTop:16,paddingTop:12,borderTop:"1px solid "+AD.border}}>
+            <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>Movimientos recientes</div>
+            {disModal.disbursements.map(d=>(
+              <div key={d.id} style={{fontSize:11,marginBottom:6,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                <span>{fmt(d.amount)} {d.paidAt?"✓ pagado":"⏳ autorizado"}</span>
+                {!d.paidAt&&<button type="button" style={{padding:"2px 8px",fontSize:10,borderRadius:6,border:"1px solid "+AD.maroon,background:"#fff",cursor:"pointer"}} onClick={async()=>{
+                  try{await adminApi("/admin/disbursements/"+d.id+"/mark-paid",{method:"POST"});setToast({m:"Marcado como pagado",tp:"ok"});const x=await adminApi("/admin/affiliates/"+disModal.id);setDisModal(m=>({...m,disbursements:x.affiliate.disbursements,availableBalancePesos:x.affiliate.availableBalancePesos}));}catch(e){setToast({m:e.message,tp:"err"});}
+                }}>Marcar pagado</button>}
+              </div>
+            ))}
+          </div>}
+        </div>
+      </div>
+    )}
+    <aside style={{width:268,background:AD.sb,flexShrink:0,display:"flex",flexDirection:"column",padding:"20px 12px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,padding:"0 8px 20px",borderBottom:"1px solid rgba(255,255,255,.08)"}}>
+        <div style={{width:40,height:40,borderRadius:"50%",background:"#fff",display:"flex",alignItems:"center",justifyContent:"center"}}><Logo s={26}/></div>
+        <div><div style={{color:"#fff",fontSize:13,fontWeight:700}}>Admin Panel</div><div style={{color:AD.gold,fontSize:11}}>Funeraria VM</div></div>
+      </div>
+      <nav style={{flex:1,paddingTop:16}}>
+        {navItem("dashboard","Dashboard","📊")}
+        {navItem("asociados","Asociados","👥")}
+        {navItem("comisiones","Comisiones","💰")}
+        {navItem("red","Red Global","🌐")}
+        {navItem("reportes","Reportes","📈")}
+        {navItem("contratos","Contratos","📋")}
+        {navItem("config","Config","⚙️")}
+      </nav>
+      <div style={{padding:"16px 10px",borderTop:"1px solid rgba(255,255,255,.08)"}}>
+        <div style={{color:AD.gold,fontSize:11,fontWeight:700}}>ADMIN</div>
+        <div style={{color:"rgba(255,255,255,.55)",fontSize:10,marginTop:4}}>NIT: {FVM_NIT}</div>
+        <div onClick={out} style={{marginTop:12,color:"rgba(255,255,255,.45)",fontSize:12,cursor:"pointer"}}>← Salir</div>
+      </div>
+    </aside>
+    <main style={{flex:1,background:AD.main,minWidth:0,overflow:"auto"}}>
+      <header style={{background:AD.card,padding:"16px 28px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid "+AD.border}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:22}}>{view==="dashboard"?"📊":view==="asociados"?"👥":view==="comisiones"?"💰":view==="red"?"🌐":view==="reportes"?"📈":view==="contratos"?"📋":"⚙️"}</span>
+          <h1 style={{margin:0,fontSize:18,color:AD.maroon,fontWeight:700}}>{view==="dashboard"?"Dashboard":view==="asociados"?"Asociados":view==="comisiones"?"Comisiones":view==="red"?"Red Global":view==="reportes"?"Reportes":view==="contratos"?"Contratos / solicitudes":"Config"}</h1>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:14}}>
+          <span style={{background:"#DCFCE7",color:"#166534",padding:"4px 10px",borderRadius:20,fontSize:11,fontWeight:600}}>● Online</span>
+          <div style={{width:36,height:36,borderRadius:"50%",background:AD.maroon,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700}}>AD</div>
+        </div>
+      </header>
+
+      {view==="dashboard"&&(
+        <div style={{padding:24}}>
+          {statsLd||!stats?<div style={{color:AD.muted}}>Cargando métricas…</div>:(
+            <>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:18,marginBottom:24}}>
+                {[
+                  {t:"Activos",v:aff+" de "+total,sub:"Con inscripción registrada",ic:"👥",c:"#7C3AED"},
+                  {t:"MRR (referencial)",v:fmt(stats.mrrReferencialPesos),sub:"Suma cuotas por plan",ic:"💰",c:AD.gold},
+                  {t:"Comisiones",v:fmt(stats.commissionsFromLinesPesos),sub:"Total en líneas",ic:"📊",c:AD.maroon},
+                  {t:"Retención",v:stats.retentionPct+"% Activos",sub:"Inscripción / total",ic:"📈",c:"#2563EB"}
+                ].map((x,i)=>(
+                  <div key={i} style={{background:AD.card,borderRadius:12,padding:18,boxShadow:"0 1px 3px rgba(0,0,0,.06)",border:"1px solid "+AD.border,position:"relative"}}>
+                    <div style={{position:"absolute",top:14,right:14,fontSize:20,opacity:.85}}>{x.ic}</div>
+                    <div style={{fontSize:11,color:AD.muted,marginBottom:6,fontWeight:600}}>{x.t}</div>
+                    <div style={{fontSize:20,fontWeight:800,color:x.c,lineHeight:1.2}}>{x.v}</div>
+                    <div style={{fontSize:10,color:AD.muted,marginTop:6}}>{x.sub}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
+                <div style={{background:AD.card,borderRadius:12,padding:22,border:"1px solid "+AD.border}}>
+                  <h3 style={{margin:"0 0 18px",fontSize:15,color:AD.maroon}}>Por Plan</h3>
+                  {[
+                    {n:"Plan Elite",c:AD.gold,v:elite,p:pct(elite,planSum)},
+                    {n:"Plan Premium",c:AD.maroon,v:pre,p:pct(pre,planSum)},
+                    {n:"Plan Platinum",c:"#111827",v:pla,p:pct(pla,planSum)}
+                  ].map((b,i)=>(
+                    <div key={i} style={{marginBottom:14}}>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:6}}><span>{b.n}</span><span style={{fontWeight:700}}>{b.v} ({b.p}%)</span></div>
+                      <div style={{height:10,borderRadius:6,background:"#E5E7EB",overflow:"hidden"}}><div style={{width:b.p+"%",height:"100%",background:b.c,borderRadius:6}}/></div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{background:AD.card,borderRadius:12,padding:22,border:"1px solid "+AD.border}}>
+                  <h3 style={{margin:"0 0 18px",fontSize:15,color:AD.maroon}}>Acciones</h3>
+                  <button onClick={()=>{setCloseM(curMonth());sView("reportes");}} style={{width:"100%",padding:14,marginBottom:10,borderRadius:10,border:"none",background:AD.maroon,color:"#fff",fontWeight:700,cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>💰 Cierre de mes (reportes)</button>
+                  <button onClick={()=>sView("asociados")} style={{width:"100%",padding:12,marginBottom:8,borderRadius:10,border:"2px solid "+AD.maroon,background:"#fff",color:AD.maroon,fontWeight:600,cursor:"pointer",fontSize:13}}>👥 Asociados</button>
+                  <button onClick={()=>sView("red")} style={{width:"100%",padding:12,marginBottom:8,borderRadius:10,border:"2px solid "+AD.maroon,background:"#fff",color:AD.maroon,fontWeight:600,cursor:"pointer",fontSize:13}}>🌐 Red Global</button>
+                  <button onClick={()=>sView("reportes")} style={{width:"100%",padding:12,borderRadius:10,border:"2px solid "+AD.maroon,background:"#fff",color:AD.maroon,fontWeight:600,cursor:"pointer",fontSize:13}}>📈 Reportes</button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {view==="asociados"&&(
+        <div style={{padding:24}}>
+          <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
+            <input className="inp" value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar (mín. 2 caracteres)…" style={{minWidth:240,background:"#fff"}}/>
+            <button className="bo" onClick={()=>go("landing")}>Sitio público</button>
+          </div>
+          {(ld||rows===null)?<div style={{color:AD.muted}}>Cargando…</div>:(
+            <div style={{background:AD.card,borderRadius:12,border:"1px solid "+AD.border,overflow:"auto",maxHeight:"48vh"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead><tr style={{background:"#F9FAFB"}}>
+                  <th style={{padding:10,textAlign:"left"}}>Nombre</th><th>Email</th><th>Plan</th><th>Código</th><th style={{textAlign:"right"}}>Red</th><th style={{textAlign:"center"}}>Ficha</th>
+                </tr></thead>
+                <tbody>
+                  {rows.map(x=>(
+                    <tr key={x.id} style={{borderBottom:"1px solid "+AD.border}}>
+                      <td style={{padding:10,maxWidth:180}}>{x.fullName}</td>
+                      <td style={{padding:10,fontSize:10,wordBreak:"break-all"}}>{x.email}</td>
+                      <td style={{padding:10}}>{x.planId}</td>
+                      <td style={{padding:10,fontFamily:"monospace",fontSize:10}}>{x.refCode}</td>
+                      <td style={{padding:10,textAlign:"right"}}>{x.networkSize}</td>
+                      <td style={{padding:10,textAlign:"center"}}>
+                        <button type="button" onClick={()=>{setSelId(selId===x.id?null:x.id);}} style={{padding:"6px 12px",borderRadius:8,border:"1px solid "+AD.maroon,background:selId===x.id?AD.maroon:"#fff",color:selId===x.id?"#fff":AD.maroon,cursor:"pointer",fontSize:11}}>{selId===x.id?"Ocultar":"Ver red + contrato"}</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {selId&&(
+            <>
+            <div style={{marginTop:20,background:AD.card,borderRadius:12,padding:16,border:"1px solid "+AD.border}}>
+              <div style={{fontSize:13,fontWeight:700,color:AD.maroon,marginBottom:10}}>Genealogía MLM (3 niveles)</div>
+              {netLd?<div style={{color:AD.muted}}>Cargando árbol…</div>:netD&&H(netD)?<FvmD3Tree data={H(netD)} translateX={300} dark={false} proVision/>:<div style={{color:AD.muted}}>Sin datos de red.</div>}
+            </div>
+            <div style={{marginTop:16,background:AD.card,borderRadius:12,padding:16,border:"1px solid "+AD.border}}>
+              <div style={{fontSize:13,fontWeight:700,color:AD.maroon,marginBottom:12}}>Contrato y datos del asociado</div>
+              {affDetailLd?<div style={{color:AD.muted}}>Cargando ficha…</div>:affDetail&&affDetail.affiliate?(
+                <div style={{fontSize:12,color:AD.muted,lineHeight:1.6}}>
+                  <p style={{margin:"0 0 10px"}}><b style={{color:"#111"}}>{affDetail.affiliate.fullName}</b> · {affDetail.affiliate.docType} {affDetail.affiliate.docNumber} · <span style={{fontFamily:"monospace"}}>{affDetail.affiliate.refCode}</span></p>
+                  <p style={{margin:"0 0 6px"}}><b>Contacto:</b> {affDetail.affiliate.email} · Tel. {affDetail.affiliate.phone||"—"} · WhatsApp {affDetail.affiliate.whatsapp||"—"}</p>
+                  <p style={{margin:"0 0 6px"}}><b>Dirección:</b> {affDetail.affiliate.address||"—"} · {affDetail.affiliate.city||""} {affDetail.affiliate.department||""}</p>
+                  <p style={{margin:"0 0 6px"}}><b>Fecha nac.:</b> {affDetail.affiliate.birthDate||"—"} · <b>Contrato emitido:</b> {affDetail.affiliate.contractIssueDate||"—"}</p>
+                  <p style={{margin:"0 0 6px"}}><b>Pagos:</b> Inscripción {affDetail.affiliate.affiliationPaidAt?"OK":"pendiente"} · Mensual hasta {affDetail.affiliate.monthlyPaidThrough||"—"} · <b>Estado comisión:</b> {affDetail.affiliate.payment?.receivesCommission?"Al día":"Mora / revisar"}</p>
+                  <div style={{marginTop:14}}>
+                    <div style={{fontWeight:700,color:AD.maroon,marginBottom:6}}>Beneficiarios</div>
+                    {(affDetail.affiliate.beneficiaries&&affDetail.affiliate.beneficiaries.length)?affDetail.affiliate.beneficiaries.map((b,i)=>(
+                      <div key={i} style={{padding:8,marginBottom:6,background:"#F9FAFB",borderRadius:8,fontSize:11}}>
+                        <b>{i+1}.</b> {(b.n||"")||"—"} · <span style={{color:"#555"}}>{b.r||"—"}</span> · Edad: {b.a||"—"} · Doc: {b.d||"—"}
+                        {String(b.ill||"").trim()?(<div style={{marginTop:4,padding:6,background:"#FFF8E1",borderRadius:4}}><b>Enfermedad:</b> {b.ill}</div>):null}
+                      </div>
+                    )):<div style={{fontSize:11}}>Sin beneficiarios registrados.</div>}
+                  </div>
+                  <div style={{marginTop:14}}>
+                    <div style={{fontWeight:700,color:AD.maroon,marginBottom:6}}>Mascotas</div>
+                    {(affDetail.affiliate.pets&&affDetail.affiliate.pets.length)?affDetail.affiliate.pets.map((p,i)=>(
+                      <div key={i} style={{padding:8,marginBottom:6,background:"#F9FAFB",borderRadius:8,fontSize:11}}>
+                        <b>{i+1}.</b> {(p.n||"")||"—"} · {p.s||"—"} · Edad: {p.a!=null&&p.a!==""?p.a:"—"}{p.b?` · Nota: ${p.b}`:""}
+                      </div>
+                    )):<div style={{fontSize:11}}>Sin mascotas en el contrato.</div>}
+                  </div>
+                  {(affDetail.affiliate.contractAudit&&affDetail.affiliate.contractAudit.length>0)&&<div style={{marginTop:14}}>
+                    <div style={{fontWeight:700,color:AD.maroon,marginBottom:6}}>Historial de cambios (auditoría)</div>
+                    {affDetail.affiliate.contractAudit.map((a,i)=><div key={i} style={{fontSize:10,marginBottom:4}}>{String(a.createdAt).slice(0,19)} — {a.action}</div>)}
+                  </div>}
+                </div>
+              ):<div style={{color:AD.muted}}>No se pudo cargar la ficha.</div>}
+            </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {view==="comisiones"&&(
+        <div style={{padding:24}}>
+          <p style={{color:AD.muted,fontSize:13,maxWidth:720,marginBottom:16}}>
+            Resumen global por mes y detalle por <b>asociado</b> (N1/N2/N3). El desembolso solo se autoriza si el patrocinador está <b>al día</b> con inscripción y mensualidad.
+          </p>
+          {comLd?<div style={{color:AD.muted}}>Cargando resumen…</div>:(
+            <div style={{background:AD.card,borderRadius:12,border:"1px solid "+AD.border,overflow:"auto",marginBottom:20}}>
+              <div style={{padding:"12px 14px",borderBottom:"1px solid "+AD.border,fontWeight:700,color:AD.maroon}}>Totales por mes (red global)</div>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead><tr style={{background:"#F9FAFB"}}><th style={{padding:10,textAlign:"left"}}>Mes</th><th>N1</th><th>N2</th><th>N3</th><th>Total</th></tr></thead>
+                <tbody>
+                  {(comMs&&comMs.length)?comMs.map(r=>(
+                    <tr key={r.month} style={{borderBottom:"1px solid "+AD.border}}>
+                      <td style={{padding:10,fontWeight:600}}>{r.month}</td><td style={{padding:10}}>{fmt(r.n1)}</td><td style={{padding:10}}>{fmt(r.n2)}</td><td style={{padding:10}}>{fmt(r.n3)}</td><td style={{padding:10,fontWeight:700,color:AD.maroon}}>{fmt(r.total)}</td>
+                    </tr>
+                  )):<tr><td colSpan={5} style={{padding:20,color:AD.muted}}>Sin movimientos.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"center",marginBottom:12}}>
+            <label style={{fontSize:13,color:AD.muted}}>Mes a detallar:</label>
+            <input className="inp" type="month" value={comMonth} onChange={e=>setComMonth(e.target.value)} style={{maxWidth:160}}/>
+            <label style={{fontSize:12,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+              <input type="checkbox" checked={affShowAll} onChange={e=>setAffShowAll(e.target.checked)}/> Ver todos (incluye $0)
+            </label>
+          </div>
+          {affByLd?<div style={{color:AD.muted}}>Cargando por asociado…</div>:(
+            <div style={{background:AD.card,borderRadius:12,border:"1px solid "+AD.border,overflow:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                <thead><tr style={{background:"#F9FAFB"}}>
+                  <th style={{padding:10,textAlign:"left"}}>Asociado</th>
+                  <th style={{padding:10}}>Estado</th>
+                  <th>N1</th><th>N2</th><th>N3</th><th>Total</th>
+                  <th style={{padding:10,textAlign:"center"}}>Desembolso</th>
+                </tr></thead>
+                <tbody>
+                  {(affBy&&affBy.length)?affBy.map(r=>(
+                    <tr key={r.id} style={{borderBottom:"1px solid "+AD.border}}>
+                      <td style={{padding:10,maxWidth:200}}>
+                        <div style={{fontWeight:600}}>{r.fullName}</div>
+                        <div style={{fontSize:10,color:AD.muted}}>{r.email}</div>
+                      </td>
+                      <td style={{padding:10}}>
+                        {r.mora?<span style={{background:"#FEE2E2",color:"#991B1B",padding:"2px 8px",borderRadius:6,fontSize:10}}>Mora</span>:<span style={{background:"#DCFCE7",color:"#166534",padding:"2px 8px",borderRadius:6,fontSize:10}}>Al día</span>}
+                      </td>
+                      <td style={{padding:10}}>{fmt(r.n1)}</td>
+                      <td style={{padding:10}}>{fmt(r.n2)}</td>
+                      <td style={{padding:10}}>{fmt(r.n3)}</td>
+                      <td style={{padding:10,fontWeight:700,color:AD.maroon}}>{fmt(r.total)}</td>
+                      <td style={{padding:10,textAlign:"center"}}>
+                        <button type="button" onClick={async()=>{
+                          setDisAmt("");setDisNote("");
+                          try{
+                            const d=await adminApi("/admin/affiliates/"+r.id);
+                            setDisModal({...r,availableBalancePesos:d.affiliate.availableBalancePesos,payment:d.affiliate.payment,disbursements:d.affiliate.disbursements||[]});
+                          }catch(e){setToast({m:e.message,tp:"err"});}
+                        }} style={{padding:"6px 10px",borderRadius:8,border:"1px solid "+AD.maroon,background:r.receivesCommission?"#fff":"#F3F4F6",color:r.receivesCommission?AD.maroon:AD.muted,cursor:r.receivesCommission?"pointer":"not-allowed",fontSize:11}} disabled={!r.receivesCommission}>Autorizar</button>
+                      </td>
+                    </tr>
+                  )):<tr><td colSpan={7} style={{padding:20,color:AD.muted}}>Sin datos para este mes. Marca “Ver todos” o elige otro mes.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {view==="red"&&(
+        <div style={{padding:24}}>
+          <p style={{color:AD.muted,marginBottom:16,maxWidth:560}}>Usa <b>Asociados</b> → <b>Ver red</b> para el árbol MLM de cada patrocinador.</p>
+          <button type="button" className="bp" onClick={()=>sView("asociados")} style={{padding:"12px 20px"}}>Ir a Asociados</button>
+        </div>
+      )}
+
+      {view==="reportes"&&(
+        <div style={{padding:24}}>
+          {repLd||!repSum?<div style={{color:AD.muted}}>Cargando reportes…</div>:(
+            <>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:16,marginBottom:24}}>
+                {[
+                  {t:"Mes calendario",v:repSum.currentMonth,ic:"📅"},
+                  {t:"Mora mensualidad",v:repSum.moraMensualCount,ic:"⚠️",c:"#B45309"},
+                  {t:"Sin inscripción",v:repSum.sinInscripcionCount,ic:"⛔",c:"#6B7280"},
+                  {t:"Solicitudes contrato",v:repSum.pendingContractRequests,ic:"📋",c:AD.maroon},
+                  {t:"Líneas anuladas (mes)",v:repSum.linesForfeitedThisMonth,ic:"📉",c:"#991B1B"}
+                ].map((x,i)=>(
+                  <div key={i} style={{background:AD.card,borderRadius:12,padding:16,border:"1px solid "+AD.border}}>
+                    <div style={{fontSize:11,color:AD.muted,marginBottom:6}}>{x.ic} {x.t}</div>
+                    <div style={{fontSize:22,fontWeight:800,color:x.c||AD.maroon}}>{x.v}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{background:AD.card,borderRadius:12,padding:16,border:"1px solid "+AD.border,marginBottom:20}}>
+                <h3 style={{color:AD.maroon,margin:"0 0 12px",fontSize:15}}>Detalle: mora de mensualidad (mes calendario {repSum.currentMonth})</h3>
+                <p style={{fontSize:12,color:AD.muted,marginBottom:10}}>Quienes tienen inscripción registrada pero la cuota mensual no cubre el mes en curso.</p>
+                <div style={{overflow:"auto",maxHeight:280}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                    <thead><tr style={{background:"#F9FAFB"}}>
+                      <th style={{padding:8,textAlign:"left"}}>Nombre</th><th>Email</th><th>Código</th><th>Plan</th><th>Mensual hasta</th><th>Tel.</th>
+                    </tr></thead>
+                    <tbody>
+                      {(repSum.moraList&&repSum.moraList.length)?repSum.moraList.map((p,idx)=>(
+                        <tr key={idx} style={{borderBottom:"1px solid "+AD.border}}>
+                          <td style={{padding:8,fontWeight:600}}>{p.fullName}</td>
+                          <td style={{padding:8,fontSize:10}}>{p.email}</td>
+                          <td style={{padding:8,fontFamily:"monospace",fontSize:10}}>{p.refCode}</td>
+                          <td style={{padding:8}}>{p.planId}</td>
+                          <td style={{padding:8}}>{p.monthlyPaidThrough||"—"}</td>
+                          <td style={{padding:8}}>{p.phone||"—"}</td>
+                        </tr>
+                      )):<tr><td colSpan={6} style={{padding:16,color:AD.muted}}>Nadie en esta categoría.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div style={{background:AD.card,borderRadius:12,padding:16,border:"1px solid "+AD.border,marginBottom:20}}>
+                <h3 style={{color:AD.maroon,margin:"0 0 12px",fontSize:15}}>Sin inscripción / afiliación registrada</h3>
+                <div style={{overflow:"auto",maxHeight:220}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                    <thead><tr style={{background:"#F9FAFB"}}>
+                      <th style={{padding:8,textAlign:"left"}}>Nombre</th><th>Email</th><th>Código</th><th>Plan</th><th>Alta</th>
+                    </tr></thead>
+                    <tbody>
+                      {(repSum.sinInscripcionList&&repSum.sinInscripcionList.length)?repSum.sinInscripcionList.map((p,idx)=>(
+                        <tr key={idx} style={{borderBottom:"1px solid "+AD.border}}>
+                          <td style={{padding:8,fontWeight:600}}>{p.fullName}</td>
+                          <td style={{padding:8,fontSize:10}}>{p.email}</td>
+                          <td style={{padding:8,fontFamily:"monospace",fontSize:10}}>{p.refCode}</td>
+                          <td style={{padding:8}}>{p.planId}</td>
+                          <td style={{padding:8,fontSize:10}}>{p.createdAt?String(p.createdAt).slice(0,10):"—"}</td>
+                        </tr>
+                      )):<tr><td colSpan={5} style={{padding:16,color:AD.muted}}>Nadie en esta categoría.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div style={{background:AD.card,borderRadius:12,padding:22,border:"1px solid "+AD.border,marginBottom:20}}>
+                <h3 style={{color:AD.maroon,marginTop:0}}>Descargas (CSV para Excel)</h3>
+                <p style={{color:AD.muted,fontSize:12,marginBottom:14}}>Incluye comisiones del periodo, altas, listas de mora y sin inscripción (instantáneo).</p>
+                <div style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"center",marginBottom:12}}>
+                  <label style={{fontSize:12}}>Mes:</label>
+                  <input className="inp" type="month" value={repExM} onChange={e=>setRepExM(e.target.value)} style={{maxWidth:160}}/>
+                  <button type="button" className="bp" onClick={async()=>{
+                    try{
+                      const d=await adminApi("/admin/reports/data/monthly?month="+encodeURIComponent(repExM));
+                      const rows=[["Reporte mensual FVM",d.month],["Generado",d.generatedAt],[],["Comisiones N1",d.commissionGlobal.n1],["Comisiones N2",d.commissionGlobal.n2],["Comisiones N3",d.commissionGlobal.n3],["Total comisiones",d.commissionGlobal.total],["Nuevos afiliados en el mes",d.newAffiliatesInMonth],["Total usuarios sistema",d.totalUsers],["Con inscripción",d.affiliatedUsers],[],["--- Mora mensualidad ---"]];
+                      (d.moraList||[]).forEach(p=>rows.push([p.fullName,p.email,p.refCode,p.planId,p.monthlyPaidThrough||"",p.phone||""]));
+                      rows.push([],["--- Sin inscripción ---"]);
+                      (d.sinInscripcionList||[]).forEach(p=>rows.push([p.fullName,p.email,p.refCode,p.planId,p.createdAt?String(p.createdAt):""]));
+                      fvmDlCsv("fvm-reporte-mensual-"+d.month+".csv",rows);
+                      setToast({m:"CSV descargado",tp:"ok"});
+                    }catch(e){setToast({m:e.message,tp:"err"});}
+                  }}>Descargar reporte mensual</button>
+                </div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"center"}}>
+                  <label style={{fontSize:12}}>Año (balance anual):</label>
+                  <input className="inp" type="number" min={2020} max={2100} value={repExY} onChange={e=>setRepExY(e.target.value)} style={{maxWidth:100}}/>
+                  <button type="button" className="bo" onClick={async()=>{
+                    try{
+                      const d=await adminApi("/admin/reports/data/annual?year="+encodeURIComponent(repExY));
+                      const rows=[["Balance anual FVM",d.year],["Generado",d.generatedAt],["Total comisiones año (COP)",d.yearCommissionTotalPesos],["Nuevos registros en el año",d.newUsersInYear],["Nuevos año anterior",d.newUsersPreviousYear],["Crecimiento % nuevos vs año ant.",d.growthNewUsersPct!=null?d.growthNewUsersPct+"%":"—"],["Usuarios totales (actual)",d.totalUsersEnd],[]];
+                      rows.push(["Mes","N1","N2","N3","Total com.","Nuevos afiliados"]);
+                      (d.months||[]).forEach(m=>rows.push([m.month,m.commission.n1,m.commission.n2,m.commission.n3,m.commission.total,m.newAffiliates]));
+                      fvmDlCsv("fvm-balance-anual-"+d.year+".csv",rows);
+                      setToast({m:"CSV anual descargado",tp:"ok"});
+                    }catch(e){setToast({m:e.message,tp:"err"});}
+                  }}>Descargar balance anual</button>
+                </div>
+              </div>
+
+              <div style={{background:AD.card,borderRadius:12,padding:22,border:"1px solid "+AD.border,maxWidth:520}}>
+                <h3 style={{color:AD.maroon,marginTop:0}}>Cierre mensual de comisiones</h3>
+                <p style={{color:AD.muted,fontSize:13,lineHeight:1.6,marginBottom:12}}>
+                  Las comisiones son por periodo (no acumulativas entre meses). Si al <b>30</b> el asociado no está al día con la <b>mensualidad</b> respecto al mes que cierras, las líneas de ese mes se <b>anulan</b> para ese asociado (regla operativa).
+                </p>
+                <div style={{display:"flex",flexWrap:"wrap",gap:10,alignItems:"center"}}>
+                  <input className="inp" type="month" value={closeM||curMonth()} onChange={e=>setCloseM(e.target.value)} style={{maxWidth:180}}/>
+                  <button type="button" className="bp" onClick={async()=>{
+                    const m=closeM||curMonth();
+                    try{
+                      const o=await adminApi("/admin/commissions/close-month",{method:"POST",body:JSON.stringify({month:m})});
+                      setToast({m:"Cierre aplicado: "+m+" — líneas anuladas: "+(o.linesForfeited||0),tp:"ok"});
+                      const r=await adminApi("/admin/reports/summary");setRepSum(r);
+                    }catch(e){setToast({m:e.message,tp:"err"});}
+                  }}>Ejecutar cierre</button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {view==="contratos"&&(
+        <div style={{padding:24}}>
+          <p style={{color:AD.muted,fontSize:13,maxWidth:720,marginBottom:16}}>
+            Solo el administrador puede aplicar cambios al contrato. Al aprobar, se guarda auditoría con fecha. Los afiliados envían solicitudes desde su cuenta (POST <code>/auth/contract-change-request</code>).
+          </p>
+          {contrLd?<div style={{color:AD.muted}}>Cargando…</div>:(
+            <div style={{background:AD.card,borderRadius:12,border:"1px solid "+AD.border,overflow:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                <thead><tr style={{background:"#F9FAFB"}}>
+                  <th style={{padding:10,textAlign:"left"}}>Fecha</th>
+                  <th>Afiliado</th>
+                  <th>Estado</th>
+                  <th>Nota</th>
+                  <th></th>
+                </tr></thead>
+                <tbody>
+                  {(contrReq&&contrReq.length)?contrReq.map(cr=>(
+                    <tr key={cr.id} style={{borderBottom:"1px solid "+AD.border}}>
+                      <td style={{padding:10,fontSize:10}}>{cr.createdAt?String(cr.createdAt).slice(0,19):""}</td>
+                      <td style={{padding:10}}>
+                        <div style={{fontWeight:600}}>{cr.userFullName}</div>
+                        <div style={{fontSize:10,color:AD.muted}}>{cr.userEmail}</div>
+                      </td>
+                      <td style={{padding:10}}>{cr.status}</td>
+                      <td style={{padding:10,maxWidth:200,wordBreak:"break-word"}}>{cr.note||"—"}</td>
+                      <td style={{padding:10,whiteSpace:"nowrap"}}>
+                        {cr.status==="pending"&&<>
+                          <button type="button" style={{marginRight:6,padding:"4px 8px",borderRadius:6,border:"none",background:"#15803D",color:"#fff",cursor:"pointer",fontSize:11}} onClick={async()=>{
+                            try{await adminApi("/admin/contract-requests/"+cr.id+"/approve",{method:"POST",body:JSON.stringify({})});setToast({m:"Solicitud aprobada",tp:"ok"});const r=await adminApi("/admin/contract-requests");setContrReq(r.requests||[]);}catch(e){setToast({m:e.message,tp:"err"});}
+                          }}>Aprobar</button>
+                          <button type="button" style={{padding:"4px 8px",borderRadius:6,border:"1px solid #ccc",cursor:"pointer",fontSize:11}} onClick={async()=>{
+                            try{await adminApi("/admin/contract-requests/"+cr.id+"/reject",{method:"POST",body:JSON.stringify({})});setToast({m:"Rechazada",tp:"ok"});const r=await adminApi("/admin/contract-requests");setContrReq(r.requests||[]);}catch(e){setToast({m:e.message,tp:"err"});}
+                          }}>Rechazar</button>
+                        </>}
+                      </td>
+                    </tr>
+                  )):<tr><td colSpan={5} style={{padding:20,color:AD.muted}}>No hay solicitudes. Ejecuta la migración SQL si la tabla no existe.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {view==="config"&&(
+        <div style={{padding:24}}>
+          <div style={{background:AD.card,borderRadius:12,padding:24,border:"1px solid "+AD.border,maxWidth:560}}>
+            <h3 style={{color:AD.maroon,marginTop:0}}>Configuración (Hostinger)</h3>
+            <p style={{fontSize:13,color:AD.muted}}><b>API:</b> antes de cargar la app, define <code>window.FVM_API_BASE</code> con la URL de tu API terminada en <code>/api</code>.</p>
+            <p style={{fontSize:13,color:AD.muted}}><b>NIT:</b> {FVM_NIT}</p>
+          </div>
+        </div>
+      )}
+    </main>
+  </div>
+);
+}

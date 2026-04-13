@@ -1,0 +1,12 @@
+# Opcional: despliegue en Render (https://render.com)
+# Conecta el repo y apunta la raíz del servicio a la carpeta `backend`
+
+services:
+  - type: web
+    name: funeraria-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production

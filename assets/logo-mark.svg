@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Funeraria La Virgen María">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#e8d48a"/>
+      <stop offset="100%" stop-color="#c9a227"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#3d1419"/>
+  <path fill="url(#g)" d="M32 12c-1.2 0-2.2 1-2.2 2.2v6.8h-6.8c-1.2 0-2.2 1-2.2 2.2s1 2.2 2.2 2.2h6.8v28c0 1.2 1 2.2 2.2 2.2s2.2-1 2.2-2.2V25.4h6.8c1.2 0 2.2-1 2.2-2.2s-1-2.2-2.2-2.2h-6.8v-6.8c0-1.2-1-2.2-2.2-2.2z"/>
+  <circle cx="32" cy="48" r="3" fill="#c9a227"/>
+</svg>
