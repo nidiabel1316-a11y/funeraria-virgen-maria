@@ -18,10 +18,31 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3001;
 
 /** Orígenes permitidos (coma). Se recorta espacios y barra final para evitar fallos CORS por typo */
-const corsOrigins = (process.env.CORS_ORIGIN || "")
+function normalizeCorsOrigin(s) {
+  return String(s ?? "")
+    .trim()
+    .replace(/\/+$/, "");
+}
+const corsFromEnv = (process.env.CORS_ORIGIN || "")
   .split(",")
-  .map((s) => s.trim().replace(/\/+$/, ""))
+  .map(normalizeCorsOrigin)
   .filter(Boolean);
+/** Sitio público Hostinger: se fusionan aunque CORS_ORIGIN en Render solo tenga localhost (evita login en blanco). */
+const corsDefaults = [
+  "https://funerariavirgenmaria.com",
+  "https://www.funerariavirgenmaria.com",
+  "http://funerariavirgenmaria.com",
+  "http://www.funerariavirgenmaria.com",
+];
+const corsSeen = new Set();
+const corsOrigins = [];
+for (const o of [...corsFromEnv, ...corsDefaults]) {
+  if (!o) continue;
+  const k = o.toLowerCase();
+  if (corsSeen.has(k)) continue;
+  corsSeen.add(k);
+  corsOrigins.push(o);
+}
 
 if (corsOrigins.length) {
   console.log("CORS permitidos:", corsOrigins.join(", "));
@@ -51,6 +72,15 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 app.use("/api/", limiter);
+
+app.get("/api", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "funeraria-api",
+    hint: "Rutas bajo /api/auth, /api/admin, … Prueba GET /api/health",
+    health: "/api/health",
+  });
+});
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "funeraria-api", ts: new Date().toISOString() });

@@ -351,6 +351,13 @@ router.post("/register", async (req, res) => {
     let sponsorId = null;
     if (body.referralCode) {
       sponsorId = await findSponsorId(client, body.referralCode);
+      if (!sponsorId) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          error:
+            "El código de referido no existe o no es válido. Verifica el enlace de patrocinio y vuelve a intentar.",
+        });
+      }
     }
 
     let referralCode = newReferralCode();
