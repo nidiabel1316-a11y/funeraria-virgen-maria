@@ -45,12 +45,14 @@ function stripSurroundingQuotes(s) {
 
 /**
  * Credenciales secretaría leídas en caliente (Render inyecta env al arranque; evita valores vacíos por orden de carga).
- * Alias: DMIN_SECRETARY_* (typo frecuente). Contraseña: comparación exacta o sin distinguir mayúsculas.
+ * Alias: DMIN_SECRETARY_PASSWORD; ADMIN_SECRETARY_PASSWOR (falta la D final en Render).
  */
 function readSecretaryEnvCreds() {
   const rawU = process.env.ADMIN_SECRETARY_USER || process.env.DMIN_SECRETARY_USER;
   const rawP =
-    process.env.ADMIN_SECRETARY_PASSWORD || process.env.DMIN_SECRETARY_PASSWORD;
+    process.env.ADMIN_SECRETARY_PASSWORD ||
+    process.env.DMIN_SECRETARY_PASSWORD ||
+    process.env.ADMIN_SECRETARY_PASSWOR;
   const user = normalizeAdminEnv(stripSurroundingQuotes(rawU));
   const password = normalizeAdminEnv(stripSurroundingQuotes(rawP));
   return { user, password };
