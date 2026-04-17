@@ -403,28 +403,84 @@ router.get("/stats", async (req, res) => {
   }
 });
 
-/** Listado de pagos en efectivo registrados por admin (trazabilidad / caja) */
+/** Listado de pagos en efectivo. ?date=YYYY-MM-DD (día calendario America/Bogota) + totales del día; ?registrar= (solo owner) filtra por quien registró. */
 router.get("/payments/cash", async (req, res) => {
   const limRaw = parseInt(String(req.query.limit || "80"), 10);
   const limit = Number.isFinite(limRaw) ? Math.min(200, Math.max(1, limRaw)) : 80;
-  const isSec = req.adminCtx?.role === "secretary";
+  const dateRaw = String(req.query.date || "").trim();
+  const registrarRaw = String(req.query.registrar || "").trim();
+  let dateFilter = null;
+  if (dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) {
+    dateFilter = dateRaw;
+  }
+  if (registrarRaw && req.adminCtx?.role !== "owner") {
+    return res.status(403).json({ error: "Solo el administrador principal puede filtrar por registrador." });
+  }
+  const regNorm = registrarRaw ? normalizeAdminBody(registrarRaw) : "";
   try {
+    const conds = [];
+    const params = [];
+    let pi = 1;
+    if (dateFilter) {
+      conds.push(`((p.created_at AT TIME ZONE 'America/Bogota')::date) = $${pi}::date`);
+      params.push(dateFilter);
+      pi++;
+    }
+    if (regNorm) {
+      conds.push(`LOWER(COALESCE(p.registered_by_username,'')) = LOWER($${pi})`);
+      params.push(regNorm);
+      pi++;
+    }
+    const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+
+    let daySummary = null;
+    if (dateFilter) {
+      const sumParams = [dateFilter];
+      let sumWhere = `WHERE ((p.created_at AT TIME ZONE 'America/Bogota')::date) = $1::date`;
+      if (regNorm) {
+        sumWhere += ` AND LOWER(COALESCE(p.registered_by_username,'')) = LOWER($2)`;
+        sumParams.push(regNorm);
+      }
+      const sq = await pool.query(
+        `SELECT
+           COALESCE(SUM(amount_cents), 0)::bigint AS total_cents,
+           COUNT(*)::int AS n,
+           COALESCE(SUM(amount_cents) FILTER (WHERE payment_type = 'affiliation'), 0)::bigint AS aff_cents,
+           COALESCE(SUM(amount_cents) FILTER (WHERE payment_type = 'monthly'), 0)::bigint AS mon_cents
+         FROM admin_cash_payments p
+         ${sumWhere}`,
+        sumParams
+      );
+      const sr = sq.rows[0];
+      daySummary = {
+        date: dateFilter,
+        totalPesos: Math.round(Number(sr.total_cents) / 100),
+        count: Number(sr.n),
+        affiliationPesos: Math.round(Number(sr.aff_cents) / 100),
+        monthlyPesos: Math.round(Number(sr.mon_cents) / 100),
+      };
+    }
+
+    params.push(limit);
+    const limPh = `$${pi}`;
     const r = await pool.query(
       `SELECT p.id, p.doc_number, p.full_name, p.payment_type, p.amount_cents, p.months_count,
               p.monthly_paid_through_before, p.monthly_paid_through_after, p.note, p.created_at,
+              p.registered_by_username,
               u.affiliation_paid_at
        FROM admin_cash_payments p
        LEFT JOIN users u ON u.id = p.user_id
+       ${where}
        ORDER BY p.created_at DESC
-       LIMIT $1::int`,
-      [limit]
+       LIMIT ${limPh}::int`,
+      params
     );
     const items = r.rows.map((row) => ({
       id: row.id,
       docNumber: row.doc_number,
       fullName: row.full_name,
       paymentType: row.payment_type,
-      amountPesos: isSec ? null : Math.round(Number(row.amount_cents) / 100),
+      amountPesos: Math.round(Number(row.amount_cents) / 100),
       monthsCount: row.months_count,
       affiliationPaidAt: row.affiliation_paid_at ?? null,
       monthlyPaidThroughBefore: storedCoverageToEndYmd(
@@ -437,11 +493,19 @@ router.get("/payments/cash", async (req, res) => {
       ),
       note: row.note,
       createdAt: row.created_at,
+      registeredBy: row.registered_by_username || null,
     }));
-    return res.json({ items });
+    const out = { items };
+    if (daySummary) out.daySummary = daySummary;
+    return res.json(out);
   } catch (e) {
     if (e.code === "42P01") {
       return res.status(503).json({ error: "Ejecuta migrate_admin_cash_payments.sql en la base de datos" });
+    }
+    if (e.code === "42703") {
+      return res.status(503).json({
+        error: "Ejecuta migrate_admin_cash_registered_by.sql en la base de datos (columna registered_by_username).",
+      });
     }
     console.error(e);
     return res.status(500).json({ error: "Error al listar pagos en efectivo" });
@@ -449,6 +513,9 @@ router.get("/payments/cash", async (req, res) => {
 });
 
 router.post("/payments/cash", async (req, res) => {
+  const registeredBy = String(req.adminCtx?.username || "")
+    .trim()
+    .slice(0, 160);
   const docNumber = normalizeDocAdm(req.body?.docNumber);
   const userIdRaw = req.body?.userId != null ? String(req.body.userId).trim() : "";
   const hasUserId = /^[0-9a-fA-F-]{36}$/.test(userIdRaw);
@@ -520,8 +587,8 @@ router.post("/payments/cash", async (req, res) => {
       await client.query(
         `INSERT INTO admin_cash_payments (
            user_id, doc_number, full_name, payment_type, amount_cents, months_count,
-           monthly_paid_through_before, monthly_paid_through_after, note
-         ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9)`,
+           monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
+         ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [
           u.id,
           u.doc_number,
@@ -532,6 +599,7 @@ router.post("/payments/cash", async (req, res) => {
           beforeForLog,
           newMonthlyPaidThrough,
           note,
+          registeredBy || null,
         ]
       );
       await client.query("COMMIT");
@@ -543,6 +611,7 @@ router.post("/payments/cash", async (req, res) => {
         fullName: u.full_name,
         amountPesos,
         commissionsApplied: out.applied,
+        registeredBy: registeredBy || null,
       });
       return res.json({
         ok: true,
@@ -572,8 +641,8 @@ router.post("/payments/cash", async (req, res) => {
     await client.query(
       `INSERT INTO admin_cash_payments (
          user_id, doc_number, full_name, payment_type, amount_cents, months_count,
-         monthly_paid_through_before, monthly_paid_through_after, note
-       ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9)`,
+         monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
+       ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         u.id,
         u.doc_number,
@@ -584,6 +653,7 @@ router.post("/payments/cash", async (req, res) => {
         beforeForLog,
         paidThrough,
         note,
+        registeredBy || null,
       ]
     );
     await client.query("COMMIT");
@@ -595,6 +665,7 @@ router.post("/payments/cash", async (req, res) => {
       fullName: u.full_name,
       amountPesos,
       months,
+      registeredBy: registeredBy || null,
     });
     return res.json({
       ok: true,

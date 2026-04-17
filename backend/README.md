@@ -24,7 +24,7 @@ Backend Node.js (Express) con PostgreSQL (Neon), JWT y contraseñas con bcrypt.
 
 5. **Pagos y fecha de contrato:** ejecuta `db/migrate_payment_affiliation.sql` (columnas `affiliation_paid_at`, `monthly_paid_through`, `signup_commissions_applied`, `contract_issue_date`). Sin esto, el registro y `/auth/me` pueden fallar si el código espera esas columnas.
 
-6. **Pagos en efectivo desde admin (obligatorio si usarás caja):** ejecuta `db/migrate_admin_cash_payments.sql` para habilitar trazabilidad de pagos en efectivo y que esos ingresos aparezcan en reportes/balance admin.
+6. **Pagos en efectivo desde admin (obligatorio si usarás caja):** ejecuta `db/migrate_admin_cash_payments.sql` para habilitar trazabilidad de pagos en efectivo y que esos ingresos aparezcan en reportes/balance admin. Luego ejecuta `db/migrate_admin_cash_registered_by.sql` para guardar **qué usuario del panel** registró cada movimiento (cierre de caja por día y filtro por secretaría en el listado).
 
 7. **Desembolsos de comisiones y reportes admin:** ejecuta `db/migrate_admin_reports_contracts.sql` en Neon (tabla `disbursement_payouts`, solicitudes de cambio de contrato, auditoría, columnas `forfeited_at` / `forfeiture_reason` en `commission_lines`). Sin esto, al usar «Autorizar desembolso» en Comisiones el API responde **503** pidiendo esa migración.
 
