@@ -33,25 +33,47 @@ function normalizeAdminBody(s) {
     .trim();
 }
 
+/** Quita comillas simples/dobles si el valor en Render/cPanel quedó guardado como "clave". */
+function stripSurroundingQuotes(s) {
+  const t = String(s ?? "").trim();
+  if (t.length < 2) return t;
+  const a = t[0];
+  const b = t[t.length - 1];
+  if ((a === '"' && b === '"') || (a === "'" && b === "'")) return t.slice(1, -1).trim();
+  return t;
+}
+
+/**
+ * Credenciales secretaría leídas en caliente (Render inyecta env al arranque; evita valores vacíos por orden de carga).
+ * Alias: DMIN_SECRETARY_* (typo frecuente). Contraseña: comparación exacta o sin distinguir mayúsculas.
+ */
+function readSecretaryEnvCreds() {
+  const rawU = process.env.ADMIN_SECRETARY_USER || process.env.DMIN_SECRETARY_USER;
+  const rawP =
+    process.env.ADMIN_SECRETARY_PASSWORD || process.env.DMIN_SECRETARY_PASSWORD;
+  const user = normalizeAdminEnv(stripSurroundingQuotes(rawU));
+  const password = normalizeAdminEnv(stripSurroundingQuotes(rawP));
+  return { user, password };
+}
+
 /** Recorta espacios/saltos: en paneles cloud a veces se copian secretos con \\n final. */
 const ADMIN_USER = normalizeAdminEnv(process.env.ADMIN_USER) || "admin";
 const ADMIN_PASSWORD = normalizeAdminEnv(process.env.ADMIN_PASSWORD) || "admin123";
-/** Perfil dedicado secretaría (mismo alcance que rol `secretary` en BD). Ambos deben estar definidos en .env para activar este login. */
-const ADMIN_SECRETARY_USER = normalizeAdminEnv(
-  process.env.ADMIN_SECRETARY_USER || process.env.DMIN_SECRETARY_USER
-);
-/** Incluye alias `DMIN_SECRETARY_PASSWORD` por un error frecuente al crear la variable en Render. */
-const ADMIN_SECRETARY_PASSWORD = normalizeAdminEnv(
-  process.env.ADMIN_SECRETARY_PASSWORD || process.env.DMIN_SECRETARY_PASSWORD
-);
 const ADMIN_FALLBACK_USER = "admin";
 const ADMIN_FALLBACK_PASSWORD = "admin123";
 
+try {
+  const s = readSecretaryEnvCreds();
+  console.info("[FVM admin] Login secretaría (.env):", s.user && s.password ? "configurado" : "no configurado");
+} catch (_e) {
+  /* ignore */
+}
+
 /**
  * Login admin:
- * 1) Cuenta en `admin_accounts` (bcrypt), rol owner o secretary
- * 2) `ADMIN_SECRETARY_USER` / `ADMIN_SECRETARY_PASSWORD` (si ambos están en .env) → **secretary**
- * 3) `admin` / `admin123` (respaldo) → **secretary** (solo si no coincide una cuenta en BD)
+ * 1) `ADMIN_SECRETARY_USER` / `ADMIN_SECRETARY_PASSWORD` (o DMIN_*) en .env → **secretary** (antes que BD: evita choque con `admin_accounts`)
+ * 2) Cuenta en `admin_accounts` (bcrypt), rol owner o secretary
+ * 3) `admin` / `admin123` (respaldo) → **secretary**
  * 4) `ADMIN_USER` / `ADMIN_PASSWORD` → **owner**
  */
 router.post("/login", async (req, res) => {
@@ -61,6 +83,23 @@ router.post("/login", async (req, res) => {
   const password = normalizeAdminBody(rawPass);
   if (!user || !password) {
     return res.status(400).json({ error: "Usuario y contraseña requeridos" });
+  }
+  const secEnv = readSecretaryEnvCreds();
+  const secretaryEnvConfigured = secEnv.user.length > 0 && secEnv.password.length > 0;
+  const passMatchesSecretaryEnv =
+    password === secEnv.password ||
+    password.toLowerCase() === String(secEnv.password).toLowerCase();
+  const matchSecretaryEnv =
+    secretaryEnvConfigured &&
+    user.toLowerCase() === secEnv.user.toLowerCase() &&
+    passMatchesSecretaryEnv;
+  if (matchSecretaryEnv) {
+    const token = jwt.sign(
+      { admin: true, aid: null, role: "secretary", u: secEnv.user },
+      JWT_SECRET,
+      { expiresIn: "8h" }
+    );
+    return res.json({ token, role: "secretary", username: secEnv.user });
   }
   const unLower = user.toLowerCase();
   try {
@@ -82,23 +121,6 @@ router.post("/login", async (req, res) => {
     }
   } catch (e) {
     if (e.code !== "42P01") console.error(e);
-  }
-  const secretaryEnvConfigured =
-    ADMIN_SECRETARY_USER.length > 0 && ADMIN_SECRETARY_PASSWORD.length > 0;
-  const passMatchesSecretaryEnv =
-    password === ADMIN_SECRETARY_PASSWORD ||
-    password.toLowerCase() === String(ADMIN_SECRETARY_PASSWORD).toLowerCase();
-  const matchSecretaryEnv =
-    secretaryEnvConfigured &&
-    user.toLowerCase() === String(ADMIN_SECRETARY_USER).toLowerCase() &&
-    passMatchesSecretaryEnv;
-  if (matchSecretaryEnv) {
-    const token = jwt.sign(
-      { admin: true, aid: null, role: "secretary", u: ADMIN_SECRETARY_USER },
-      JWT_SECRET,
-      { expiresIn: "8h" }
-    );
-    return res.json({ token, role: "secretary", username: ADMIN_SECRETARY_USER });
   }
   const matchFallback =
     user.toLowerCase() === ADMIN_FALLBACK_USER &&
