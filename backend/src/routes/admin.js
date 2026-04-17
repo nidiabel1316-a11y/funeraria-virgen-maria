@@ -403,6 +403,23 @@ router.get("/stats", async (req, res) => {
   }
 });
 
+/** True si existe la columna registered_by_username (migración opcional). */
+let _cashPayHasRegistrarCol = null;
+async function adminCashPaymentsHasRegistrarColumn() {
+  if (_cashPayHasRegistrarCol !== null) return _cashPayHasRegistrarCol;
+  try {
+    const r = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'admin_cash_payments' AND column_name = 'registered_by_username'
+       LIMIT 1`
+    );
+    _cashPayHasRegistrarCol = r.rowCount > 0;
+  } catch {
+    _cashPayHasRegistrarCol = false;
+  }
+  return _cashPayHasRegistrarCol;
+}
+
 /** Listado de pagos en efectivo. ?date=YYYY-MM-DD (día calendario America/Bogota) + totales del día; ?registrar= (solo owner) filtra por quien registró. */
 router.get("/payments/cash", async (req, res) => {
   const limRaw = parseInt(String(req.query.limit || "80"), 10);
@@ -418,6 +435,7 @@ router.get("/payments/cash", async (req, res) => {
   }
   const regNorm = registrarRaw ? normalizeAdminBody(registrarRaw) : "";
   try {
+    const hasRegCol = await adminCashPaymentsHasRegistrarColumn();
     const conds = [];
     const params = [];
     let pi = 1;
@@ -426,7 +444,7 @@ router.get("/payments/cash", async (req, res) => {
       params.push(dateFilter);
       pi++;
     }
-    if (regNorm) {
+    if (regNorm && hasRegCol) {
       conds.push(`LOWER(COALESCE(p.registered_by_username,'')) = LOWER($${pi})`);
       params.push(regNorm);
       pi++;
@@ -437,7 +455,7 @@ router.get("/payments/cash", async (req, res) => {
     if (dateFilter) {
       const sumParams = [dateFilter];
       let sumWhere = `WHERE ((p.created_at AT TIME ZONE 'America/Bogota')::date) = $1::date`;
-      if (regNorm) {
+      if (regNorm && hasRegCol) {
         sumWhere += ` AND LOWER(COALESCE(p.registered_by_username,'')) = LOWER($2)`;
         sumParams.push(regNorm);
       }
@@ -463,10 +481,11 @@ router.get("/payments/cash", async (req, res) => {
 
     params.push(limit);
     const limPh = `$${pi}`;
+    const regSel = hasRegCol ? ", p.registered_by_username" : "";
     const r = await pool.query(
       `SELECT p.id, p.doc_number, p.full_name, p.payment_type, p.amount_cents, p.months_count,
-              p.monthly_paid_through_before, p.monthly_paid_through_after, p.note, p.created_at,
-              p.registered_by_username,
+              p.monthly_paid_through_before, p.monthly_paid_through_after, p.note, p.created_at
+              ${regSel},
               u.affiliation_paid_at
        FROM admin_cash_payments p
        LEFT JOIN users u ON u.id = p.user_id
@@ -493,7 +512,7 @@ router.get("/payments/cash", async (req, res) => {
       ),
       note: row.note,
       createdAt: row.created_at,
-      registeredBy: row.registered_by_username || null,
+      registeredBy: hasRegCol ? row.registered_by_username || null : null,
     }));
     const out = { items };
     if (daySummary) out.daySummary = daySummary;
@@ -501,11 +520,6 @@ router.get("/payments/cash", async (req, res) => {
   } catch (e) {
     if (e.code === "42P01") {
       return res.status(503).json({ error: "Ejecuta migrate_admin_cash_payments.sql en la base de datos" });
-    }
-    if (e.code === "42703") {
-      return res.status(503).json({
-        error: "Ejecuta migrate_admin_cash_registered_by.sql en la base de datos (columna registered_by_username).",
-      });
     }
     console.error(e);
     return res.status(500).json({ error: "Error al listar pagos en efectivo" });
@@ -539,6 +553,7 @@ router.post("/payments/cash", async (req, res) => {
   const amountCents = Math.round(amountPesos * 100);
   const client = await pool.connect();
   try {
+    const hasRegCol = await adminCashPaymentsHasRegistrarColumn();
     await client.query("BEGIN");
     const qr = hasUserId
       ? await client.query(
@@ -584,24 +599,44 @@ router.post("/payments/cash", async (req, res) => {
       const out = await applySignupCommissionsOnceAdm(client, u.id);
       const refreshed = await client.query(`SELECT monthly_paid_through FROM users WHERE id = $1::uuid`, [u.id]);
       const newMonthlyPaidThrough = refreshed.rows[0]?.monthly_paid_through;
-      await client.query(
-        `INSERT INTO admin_cash_payments (
-           user_id, doc_number, full_name, payment_type, amount_cents, months_count,
-           monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
-         ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [
-          u.id,
-          u.doc_number,
-          u.full_name,
-          paymentType,
-          amountCents,
-          1,
-          beforeForLog,
-          newMonthlyPaidThrough,
-          note,
-          registeredBy || null,
-        ]
-      );
+      if (hasRegCol) {
+        await client.query(
+          `INSERT INTO admin_cash_payments (
+             user_id, doc_number, full_name, payment_type, amount_cents, months_count,
+             monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
+           ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [
+            u.id,
+            u.doc_number,
+            u.full_name,
+            paymentType,
+            amountCents,
+            1,
+            beforeForLog,
+            newMonthlyPaidThrough,
+            note,
+            registeredBy || null,
+          ]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO admin_cash_payments (
+             user_id, doc_number, full_name, payment_type, amount_cents, months_count,
+             monthly_paid_through_before, monthly_paid_through_after, note
+           ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            u.id,
+            u.doc_number,
+            u.full_name,
+            paymentType,
+            amountCents,
+            1,
+            beforeForLog,
+            newMonthlyPaidThrough,
+            note,
+          ]
+        );
+      }
       await client.query("COMMIT");
       await logAdminAudit(req, "payments.cash", {
         paymentType: "affiliation",
@@ -638,24 +673,44 @@ router.post("/payments/cash", async (req, res) => {
       `UPDATE users SET monthly_paid_through = $1, updated_at = NOW() WHERE id = $2::uuid`,
       [paidThrough, u.id]
     );
-    await client.query(
-      `INSERT INTO admin_cash_payments (
-         user_id, doc_number, full_name, payment_type, amount_cents, months_count,
-         monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
-       ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [
-        u.id,
-        u.doc_number,
-        u.full_name,
-        paymentType,
-        amountCents,
-        months,
-        beforeForLog,
-        paidThrough,
-        note,
-        registeredBy || null,
-      ]
-    );
+    if (hasRegCol) {
+      await client.query(
+        `INSERT INTO admin_cash_payments (
+           user_id, doc_number, full_name, payment_type, amount_cents, months_count,
+           monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
+         ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [
+          u.id,
+          u.doc_number,
+          u.full_name,
+          paymentType,
+          amountCents,
+          months,
+          beforeForLog,
+          paidThrough,
+          note,
+          registeredBy || null,
+        ]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO admin_cash_payments (
+           user_id, doc_number, full_name, payment_type, amount_cents, months_count,
+           monthly_paid_through_before, monthly_paid_through_after, note
+         ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          u.id,
+          u.doc_number,
+          u.full_name,
+          paymentType,
+          amountCents,
+          months,
+          beforeForLog,
+          paidThrough,
+          note,
+        ]
+      );
+    }
     await client.query("COMMIT");
     await logAdminAudit(req, "payments.cash", {
       paymentType: "monthly",
@@ -683,6 +738,13 @@ router.post("/payments/cash", async (req, res) => {
       return res.status(503).json({ error: "Ejecuta migrate_admin_cash_payments.sql en la base de datos" });
     }
     if (e.code === "42703") {
+      const em = String(e.message || "");
+      if (em.includes("registered_by_username")) {
+        return res.status(503).json({
+          error:
+            "Ejecuta en Neon: db/migrate_admin_cash_registered_by.sql (columna registered_by_username). Tras desplegar el último código ya no debería ser obligatorio.",
+        });
+      }
       return res.status(503).json({ error: "Ejecuta migrate_payment_affiliation.sql y luego migrate_admin_cash_payments.sql" });
     }
     return res.status(500).json({ error: "No se pudo registrar el pago en efectivo" });
