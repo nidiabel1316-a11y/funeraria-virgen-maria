@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "dev:clean": "powershell -ExecutionPolicy Bypass -File ./iniciar.ps1"
+    "dev:clean": "powershell -ExecutionPolicy Bypass -File ./iniciar.ps1",
+    "create-admin-user": "node scripts/create-admin-user.mjs"
   },
   "engines": {
     "node": ">=18"

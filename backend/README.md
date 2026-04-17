@@ -26,24 +26,28 @@ Backend Node.js (Express) con PostgreSQL (Neon), JWT y contraseñas con bcrypt.
 
 6. **Pagos en efectivo desde admin (obligatorio si usarás caja):** ejecuta `db/migrate_admin_cash_payments.sql` para habilitar trazabilidad de pagos en efectivo y que esos ingresos aparezcan en reportes/balance admin.
 
-7. **Cobertura mensual por fecha (YYYY-MM-DD):** si la base ya existía con `monthly_paid_through` en `VARCHAR(7)`, ejecuta una vez `db/migrate_monthly_paid_through_ymd.sql` en Neon para guardar vencimientos completos sin truncar. Instalaciones nuevas que usen las migraciones actualizadas ya crean `VARCHAR(10)`.
+7. **Desembolsos de comisiones y reportes admin:** ejecuta `db/migrate_admin_reports_contracts.sql` en Neon (tabla `disbursement_payouts`, solicitudes de cambio de contrato, auditoría, columnas `forfeited_at` / `forfeiture_reason` en `commission_lines`). Sin esto, al usar «Autorizar desembolso» en Comisiones el API responde **503** pidiendo esa migración.
 
-8. **Normalizar históricos legacy (recomendado):** si ya tenías datos con `monthly_paid_through` en `YYYY-MM`, ejecuta `db/migrate_normalize_legacy_monthly_anchor.sql` para convertirlos al patrón anclado por día de afiliación (evita que historial/reporte muestre "fin de mes calendario").
+8. **Roles del panel admin y auditoría de acciones:** ejecuta `db/migrate_admin_roles_audit.sql`. Crea cuentas con contraseña bcrypt desde la carpeta `backend`: `npm run create-admin-user -- <usuario> <clave> owner` (administrador total) o `... secretary` (solo dashboard, listado de asociados y pagos en efectivo). **Secretaría por .env:** define `ADMIN_SECRETARY_USER` y `ADMIN_SECRETARY_PASSWORD` (ambos obligatorios para activar ese login); entra siempre como **secretary**. Si en Render creaste por error `DMIN_SECRETARY_PASSWORD` o `DMIN_SECRETARY_USER`, el backend también los lee como alias. El respaldo `admin` / `admin123` sigue siendo **secretaría** para desarrollo. El par `ADMIN_USER` / `ADMIN_PASSWORD` es **propietario** (`owner`). También puedes crear usuario en BD: `npm run create-admin-user -- <usuario> <clave> secretary`. El propietario ve en el panel la sección **Auditoría** (quién hizo qué, cuándo, IP; en pagos/desembolsos el JSON incluye `referralCode` del afiliado).
 
-9. **Poner todos los saldos y métricas en cero** (balance, red, directos, comisiones y líneas de comisión) antes de producción o tras pruebas: ejecuta `db/reset_metricas_ceros.sql` en Neon. Los **nuevos** registros ya nacen en 0 por defecto.
+9. **Cobertura mensual por fecha (YYYY-MM-DD):** si la base ya existía con `monthly_paid_through` en `VARCHAR(7)`, ejecuta una vez `db/migrate_monthly_paid_through_ymd.sql` en Neon para guardar vencimientos completos sin truncar. Instalaciones nuevas que usen las migraciones actualizadas ya crean `VARCHAR(10)`.
 
-10. **Documento único (cédula):** en `schema.sql`, `doc_number` es `UNIQUE`. Si una base antigua se creó sin esa restricción, ejecuta una vez `db/ensure_unique_doc_number.sql`. El registro rechaza duplicados con **409** y mensaje explícito.
+10. **Normalizar históricos legacy (recomendado):** si ya tenías datos con `monthly_paid_through` en `YYYY-MM`, ejecuta `db/migrate_normalize_legacy_monthly_anchor.sql` para convertirlos al patrón anclado por día de afiliación (evita que historial/reporte muestre "fin de mes calendario").
 
-11. Genera un `JWT_SECRET` largo y aleatorio (mínimo 32 caracteres).
+11. **Poner todos los saldos y métricas en cero** (balance, red, directos, comisiones y líneas de comisión) antes de producción o tras pruebas: ejecuta `db/reset_metricas_ceros.sql` en Neon. Los **nuevos** registros ya nacen en 0 por defecto.
 
-12. Instala dependencias e inicia:
+12. **Documento único (cédula):** en `schema.sql`, `doc_number` es `UNIQUE`. Si una base antigua se creó sin esa restricción, ejecuta una vez `db/ensure_unique_doc_number.sql`. El registro rechaza duplicados con **409** y mensaje explícito.
+
+13. Genera un `JWT_SECRET` largo y aleatorio (mínimo 32 caracteres).
+
+14. Instala dependencias e inicia:
 
    ```bash
    npm install
    npm run dev
    ```
 
-13. Prueba: `http://localhost:3001/api/health`
+15. Prueba: `http://localhost:3001/api/health`
 
 ## Variables de entorno (producción)
 

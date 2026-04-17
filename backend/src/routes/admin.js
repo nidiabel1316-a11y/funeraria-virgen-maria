@@ -1,5 +1,6 @@
 import { Router } from "express";
 import jwt from "jsonwebtoken";
+import bcrypt from "bcrypt";
 import { pool } from "../db.js";
 import { countDirectReferrals, countNetworkDownline } from "../networkCounts.js";
 import { computeAvailableBalanceCents } from "../ledgerBalance.js";
@@ -35,32 +36,116 @@ function normalizeAdminBody(s) {
 /** Recorta espacios/saltos: en paneles cloud a veces se copian secretos con \\n final. */
 const ADMIN_USER = normalizeAdminEnv(process.env.ADMIN_USER) || "admin";
 const ADMIN_PASSWORD = normalizeAdminEnv(process.env.ADMIN_PASSWORD) || "admin123";
+/** Perfil dedicado secretaría (mismo alcance que rol `secretary` en BD). Ambos deben estar definidos en .env para activar este login. */
+const ADMIN_SECRETARY_USER = normalizeAdminEnv(
+  process.env.ADMIN_SECRETARY_USER || process.env.DMIN_SECRETARY_USER
+);
+/** Incluye alias `DMIN_SECRETARY_PASSWORD` por un error frecuente al crear la variable en Render. */
+const ADMIN_SECRETARY_PASSWORD = normalizeAdminEnv(
+  process.env.ADMIN_SECRETARY_PASSWORD || process.env.DMIN_SECRETARY_PASSWORD
+);
 const ADMIN_FALLBACK_USER = "admin";
 const ADMIN_FALLBACK_PASSWORD = "admin123";
 
-/** Login admin - devuelve token para usar en X-Admin-Token */
-router.post("/login", (req, res) => {
+/**
+ * Login admin:
+ * 1) Cuenta en `admin_accounts` (bcrypt), rol owner o secretary
+ * 2) `ADMIN_SECRETARY_USER` / `ADMIN_SECRETARY_PASSWORD` (si ambos están en .env) → **secretary**
+ * 3) `admin` / `admin123` (respaldo) → **secretary** (solo si no coincide una cuenta en BD)
+ * 4) `ADMIN_USER` / `ADMIN_PASSWORD` → **owner**
+ */
+router.post("/login", async (req, res) => {
   const rawUser = req.body?.user ?? req.body?.username ?? "";
   const rawPass = req.body?.password ?? req.body?.pass ?? "";
   const user = normalizeAdminBody(rawUser);
   const password = normalizeAdminBody(rawPass);
-  const matchEnv =
-    user.toLowerCase() === String(ADMIN_USER).toLowerCase() &&
-    password.toLowerCase() === String(ADMIN_PASSWORD).toLowerCase();
-  /** Misma semántica que antes: admin/admin123 sigue valiendo aunque existan otras variables en el servidor. */
-  const matchFallback =
-    user.toLowerCase() === ADMIN_FALLBACK_USER &&
-    password.toLowerCase() === ADMIN_FALLBACK_PASSWORD.toLowerCase();
-  if (matchEnv || matchFallback) {
+  if (!user || !password) {
+    return res.status(400).json({ error: "Usuario y contraseña requeridos" });
+  }
+  const unLower = user.toLowerCase();
+  try {
+    const br = await pool.query(
+      `SELECT id, username, password_hash, role FROM admin_accounts WHERE LOWER(username) = $1 AND is_active = TRUE`,
+      [unLower]
+    );
+    if (br.rows[0]) {
+      const row = br.rows[0];
+      const ok = await bcrypt.compare(password, row.password_hash);
+      if (ok) {
+        const token = jwt.sign(
+          { admin: true, aid: String(row.id), role: row.role, u: row.username },
+          JWT_SECRET,
+          { expiresIn: "8h" }
+        );
+        return res.json({ token, role: row.role, username: row.username });
+      }
+    }
+  } catch (e) {
+    if (e.code !== "42P01") console.error(e);
+  }
+  const secretaryEnvConfigured =
+    ADMIN_SECRETARY_USER.length > 0 && ADMIN_SECRETARY_PASSWORD.length > 0;
+  const passMatchesSecretaryEnv =
+    password === ADMIN_SECRETARY_PASSWORD ||
+    password.toLowerCase() === String(ADMIN_SECRETARY_PASSWORD).toLowerCase();
+  const matchSecretaryEnv =
+    secretaryEnvConfigured &&
+    user.toLowerCase() === String(ADMIN_SECRETARY_USER).toLowerCase() &&
+    passMatchesSecretaryEnv;
+  if (matchSecretaryEnv) {
     const token = jwt.sign(
-      { admin: true },
+      { admin: true, aid: null, role: "secretary", u: ADMIN_SECRETARY_USER },
       JWT_SECRET,
       { expiresIn: "8h" }
     );
-    return res.json({ token });
+    return res.json({ token, role: "secretary", username: ADMIN_SECRETARY_USER });
+  }
+  const matchFallback =
+    user.toLowerCase() === ADMIN_FALLBACK_USER &&
+    password.toLowerCase() === ADMIN_FALLBACK_PASSWORD.toLowerCase();
+  if (matchFallback) {
+    const token = jwt.sign(
+      { admin: true, aid: null, role: "secretary", u: ADMIN_FALLBACK_USER },
+      JWT_SECRET,
+      { expiresIn: "8h" }
+    );
+    return res.json({ token, role: "secretary", username: ADMIN_FALLBACK_USER });
+  }
+  const matchEnv =
+    user.toLowerCase() === String(ADMIN_USER).toLowerCase() &&
+    password.toLowerCase() === String(ADMIN_PASSWORD).toLowerCase();
+  if (matchEnv) {
+    const token = jwt.sign(
+      { admin: true, aid: null, role: "owner", u: ADMIN_USER },
+      JWT_SECRET,
+      { expiresIn: "8h" }
+    );
+    return res.json({ token, role: "owner", username: ADMIN_USER });
   }
   return res.status(401).json({ error: "Credenciales inválidas" });
 });
+
+async function logAdminAudit(req, action, detail = {}) {
+  const ctx = req.adminCtx;
+  if (!ctx) return;
+  try {
+    await pool.query(
+      `INSERT INTO admin_audit_log (admin_account_id, admin_username, admin_role, action, detail, ip, user_agent)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+      [
+        ctx.aid || null,
+        ctx.username,
+        ctx.role,
+        action,
+        JSON.stringify(detail ?? {}),
+        String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").slice(0, 200),
+        String(req.headers["user-agent"] || "").slice(0, 400),
+      ]
+    );
+  } catch (e) {
+    if (e.code !== "42P01") console.error("admin_audit_log:", e.message);
+  }
+}
 
 function requireAdmin(req, res, next) {
   const token = req.headers["x-admin-token"] || req.headers["authorization"]?.replace("Bearer ", "");
@@ -68,15 +153,64 @@ function requireAdmin(req, res, next) {
     return res.status(403).json({ error: "Token requerido" });
   }
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(String(token).trim(), JWT_SECRET);
     if (!decoded.admin) return res.status(403).json({ error: "Acceso denegado" });
+    const role = decoded.role === "secretary" ? "secretary" : "owner";
+    req.adminCtx = {
+      aid: decoded.aid && /^[0-9a-f-]{36}$/i.test(String(decoded.aid)) ? String(decoded.aid) : null,
+      role,
+      username: String(decoded.u || "admin"),
+    };
     next();
   } catch {
     return res.status(403).json({ error: "Token inválido" });
   }
 }
 
+function requireOwner(req, res, next) {
+  if (!req.adminCtx || req.adminCtx.role !== "owner") {
+    return res.status(403).json({ error: "Solo el administrador principal puede realizar esta acción." });
+  }
+  next();
+}
+
 router.use(requireAdmin);
+
+router.get("/me", (req, res) => {
+  res.json({
+    username: req.adminCtx.username,
+    role: req.adminCtx.role,
+    accountId: req.adminCtx.aid,
+  });
+});
+
+router.get("/audit-log", requireOwner, async (req, res) => {
+  const lim = Math.min(500, Math.max(1, Number(req.query.limit) || 120));
+  try {
+    const r = await pool.query(
+      `SELECT id, admin_username, admin_role, action, detail, ip, created_at
+       FROM admin_audit_log ORDER BY created_at DESC LIMIT $1::int`,
+      [lim]
+    );
+    return res.json({
+      items: r.rows.map((row) => ({
+        id: row.id,
+        adminUsername: row.admin_username,
+        adminRole: row.admin_role,
+        action: row.action,
+        detail: row.detail,
+        ip: row.ip,
+        createdAt: row.created_at,
+      })),
+    });
+  } catch (e) {
+    if (e.code === "42P01") {
+      return res.status(503).json({ error: "Ejecuta migrate_admin_roles_audit.sql en la base de datos" });
+    }
+    console.error(e);
+    return res.status(500).json({ error: "Error al listar auditoría" });
+  }
+});
 
 const NETWORK_WIDTH_ADMIN = { n1: 8, n2: 64, n3: 512 };
 const PLAN_BASE_PESOS_ADM = { elite: 100000, premium: 250000, platinum: 500000 };
@@ -150,9 +284,30 @@ async function applySignupCommissionsOnceAdm(client, newUserId) {
   return { applied: true };
 }
 
-/** Métricas globales (dashboard admin) */
-router.get("/stats", async (_req, res) => {
+/** Métricas globales (dashboard admin). Secretaría: solo conteos operativos (sin MRR/comisiones/caja global). */
+router.get("/stats", async (req, res) => {
   try {
+    if (req.adminCtx?.role === "secretary") {
+      const r = await pool.query(`SELECT COUNT(*)::int AS total FROM users`);
+      const total = Number(r.rows[0].total);
+      let affiliated = total;
+      try {
+        const a = await pool.query(
+          `SELECT COUNT(*)::int AS c FROM users WHERE affiliation_paid_at IS NOT NULL`
+        );
+        affiliated = a.rows[0].c;
+      } catch (e) {
+        if (e.code !== "42703") throw e;
+      }
+      const retentionPct = total > 0 ? Math.round((affiliated / total) * 1000) / 10 : 0;
+      return res.json({
+        scope: "secretary",
+        totalUsers: total,
+        affiliatedUsers: affiliated,
+        retentionPct,
+      });
+    }
+
     const r = await pool.query(`
       SELECT
         COUNT(*)::int AS total,
@@ -228,6 +383,7 @@ router.get("/stats", async (_req, res) => {
 router.get("/payments/cash", async (req, res) => {
   const limRaw = parseInt(String(req.query.limit || "80"), 10);
   const limit = Number.isFinite(limRaw) ? Math.min(200, Math.max(1, limRaw)) : 80;
+  const isSec = req.adminCtx?.role === "secretary";
   try {
     const r = await pool.query(
       `SELECT p.id, p.doc_number, p.full_name, p.payment_type, p.amount_cents, p.months_count,
@@ -244,7 +400,7 @@ router.get("/payments/cash", async (req, res) => {
       docNumber: row.doc_number,
       fullName: row.full_name,
       paymentType: row.payment_type,
-      amountPesos: Math.round(Number(row.amount_cents) / 100),
+      amountPesos: isSec ? null : Math.round(Number(row.amount_cents) / 100),
       monthsCount: row.months_count,
       affiliationPaidAt: row.affiliation_paid_at ?? null,
       monthlyPaidThroughBefore: storedCoverageToEndYmd(
@@ -295,12 +451,12 @@ router.post("/payments/cash", async (req, res) => {
     await client.query("BEGIN");
     const qr = hasUserId
       ? await client.query(
-          `SELECT id, doc_number, full_name, sponsor_id, plan_id, affiliation_paid_at, monthly_paid_through
+          `SELECT id, doc_number, full_name, referral_code, sponsor_id, plan_id, affiliation_paid_at, monthly_paid_through
            FROM users WHERE id = $1::uuid FOR UPDATE`,
           [userIdRaw]
         )
       : await client.query(
-          `SELECT id, doc_number, full_name, sponsor_id, plan_id, affiliation_paid_at, monthly_paid_through
+          `SELECT id, doc_number, full_name, referral_code, sponsor_id, plan_id, affiliation_paid_at, monthly_paid_through
            FROM users
            WHERE regexp_replace(COALESCE(doc_number,''), '\\D', '', 'g') = $1
            FOR UPDATE`,
@@ -355,6 +511,15 @@ router.post("/payments/cash", async (req, res) => {
         ]
       );
       await client.query("COMMIT");
+      await logAdminAudit(req, "payments.cash", {
+        paymentType: "affiliation",
+        affiliateUserId: u.id,
+        docNumber: u.doc_number,
+        referralCode: u.referral_code ?? null,
+        fullName: u.full_name,
+        amountPesos,
+        commissionsApplied: out.applied,
+      });
       return res.json({
         ok: true,
         userId: u.id,
@@ -398,6 +563,15 @@ router.post("/payments/cash", async (req, res) => {
       ]
     );
     await client.query("COMMIT");
+    await logAdminAudit(req, "payments.cash", {
+      paymentType: "monthly",
+      affiliateUserId: u.id,
+      docNumber: u.doc_number,
+      referralCode: u.referral_code ?? null,
+      fullName: u.full_name,
+      amountPesos,
+      months,
+    });
     return res.json({
       ok: true,
       userId: u.id,
@@ -423,7 +597,7 @@ router.post("/payments/cash", async (req, res) => {
 });
 
 /** Comisiones globales por mes (toda la red; excluye líneas anuladas por mora/cierre) */
-router.get("/commissions/summary", async (_req, res) => {
+router.get("/commissions/summary", requireOwner, async (_req, res) => {
   try {
     let r;
     try {
@@ -476,7 +650,7 @@ const SQL_ADM_LVL = `SELECT id, sponsor_id, doc_number, full_name, email, plan_i
 const SQL_ADM_LVL_NO = `SELECT id, sponsor_id, doc_number, full_name, email, plan_id, referral_code, created_at, affiliation_paid_at, monthly_paid_through FROM users WHERE sponsor_id = ANY($1::uuid[]) ORDER BY created_at`;
 
 /** Red MLM (3 niveles) vista admin — mismo formato que GET /auth/network */
-router.get("/affiliates/:id/network", async (req, res) => {
+router.get("/affiliates/:id/network", requireOwner, async (req, res) => {
   const userId = req.params.id;
   try {
     let meRow;
@@ -562,49 +736,106 @@ router.get("/affiliates/:id/network", async (req, res) => {
   }
 });
 
-/** Lista todos los afiliados. ?q=texto filtra por nombre, correo, documento o código de referido (ILIKE). */
+/** Lista todos los afiliados. ?q=texto: nombre, correo, documento o código (ILIKE ≥2); o ≥5 dígitos en doc normalizado. */
 router.get("/affiliates", async (req, res) => {
   try {
     const qRaw = String(req.query?.q || "").trim();
+    const qDigits = qRaw.replace(/\D/g, "");
     const params = [];
     let where = "";
-    if (qRaw.length >= 2) {
-      params.push(`%${qRaw}%`);
-      params.push(`%${qRaw}%`);
-      params.push(`%${qRaw}%`);
-      params.push(`%${qRaw}%`);
+    const minText = qRaw.length >= 2;
+    const minDocDigits = qDigits.length >= 5;
+    if (minText && minDocDigits) {
+      params.push(`%${qRaw}%`, `%${qRaw}%`, `%${qRaw}%`, `%${qRaw}%`, `%${qDigits}%`);
+      where = ` WHERE (
+        full_name ILIKE $1 OR email ILIKE $2 OR doc_number ILIKE $3 OR referral_code ILIKE $4
+        OR regexp_replace(COALESCE(doc_number, ''), '[^0-9]', '', 'g') LIKE $5
+      )`;
+    } else if (minText) {
+      params.push(`%${qRaw}%`, `%${qRaw}%`, `%${qRaw}%`, `%${qRaw}%`);
       where = ` WHERE (
         full_name ILIKE $1 OR email ILIKE $2 OR doc_number ILIKE $3 OR referral_code ILIKE $4
       )`;
+    } else if (minDocDigits) {
+      params.push(`%${qDigits}%`);
+      where = ` WHERE regexp_replace(COALESCE(doc_number, ''), '[^0-9]', '', 'g') LIKE $1`;
     }
-    const r = await pool.query(
-      `SELECT id, doc_number, doc_type, full_name, email, plan_id, referral_code,
-              sponsor_id, balance_cents, network_size, direct_count, commission_cents,
-              beneficiaries, pets, city, created_at
-       FROM users
-       ${where}
-       ORDER BY created_at DESC
-       LIMIT 500`,
-      params
-    );
-    const affiliates = r.rows.map((u) => ({
-      id: u.id,
-      docNumber: u.doc_number,
-      docType: u.doc_type,
-      fullName: u.full_name,
-      email: u.email,
-      planId: u.plan_id,
-      refCode: u.referral_code,
-      sponsorId: u.sponsor_id,
-      balance: Math.round(Number(u.balance_cents) / 100),
-      networkSize: u.network_size,
-      directCount: u.direct_count,
-      commission: Math.round(Number(u.commission_cents) / 100),
-      beneficiaries: u.beneficiaries || [],
-      pets: u.pets || [],
-      city: u.city,
-      createdAt: u.created_at,
-    }));
+    let r;
+    try {
+      r = await pool.query(
+        `SELECT id, doc_number, doc_type, full_name, email, plan_id, referral_code,
+                sponsor_id, balance_cents, network_size, direct_count, commission_cents,
+                beneficiaries, pets, city, created_at,
+                affiliation_paid_at, monthly_paid_through
+         FROM users
+         ${where}
+         ORDER BY created_at DESC
+         LIMIT 500`,
+        params
+      );
+    } catch (e) {
+      if (e.code !== "42703") throw e;
+      r = await pool.query(
+        `SELECT id, doc_number, doc_type, full_name, email, plan_id, referral_code,
+                sponsor_id, balance_cents, network_size, direct_count, commission_cents,
+                beneficiaries, pets, city, created_at
+         FROM users
+         ${where}
+         ORDER BY created_at DESC
+         LIMIT 500`,
+        params
+      );
+    }
+    const affiliates = r.rows.map((u) => {
+      const pay =
+        Object.prototype.hasOwnProperty.call(u, "affiliation_paid_at") ||
+        Object.prototype.hasOwnProperty.call(u, "monthly_paid_through")
+          ? paymentFlagsFromRowAdm({
+              affiliation_paid_at: u.affiliation_paid_at,
+              monthly_paid_through: u.monthly_paid_through,
+            })
+          : null;
+      return {
+        id: u.id,
+        docNumber: u.doc_number,
+        docType: u.doc_type,
+        fullName: u.full_name,
+        email: u.email,
+        planId: u.plan_id,
+        refCode: u.referral_code,
+        sponsorId: u.sponsor_id,
+        balance: Math.round(Number(u.balance_cents) / 100),
+        networkSize: u.network_size,
+        directCount: u.direct_count,
+        commission: Math.round(Number(u.commission_cents) / 100),
+        beneficiaries: u.beneficiaries || [],
+        pets: u.pets || [],
+        city: u.city,
+        createdAt: u.created_at,
+        affiliationPaidAt: u.affiliation_paid_at
+          ? u.affiliation_paid_at instanceof Date
+            ? u.affiliation_paid_at.toISOString()
+            : String(u.affiliation_paid_at)
+          : null,
+        monthlyPaidThrough: u.monthly_paid_through ?? null,
+        mora: pay ? pay.mora : null,
+        moraReason: pay ? pay.moraReason : null,
+        receivesCommission: pay ? pay.receivesCommission : null,
+      };
+    });
+    if (req.adminCtx?.role === "secretary") {
+      const redacted = affiliates.map((a) => {
+        const {
+          balance: _b,
+          commission: _c,
+          networkSize: _n,
+          directCount: _d,
+          ...rest
+        } = a;
+        return rest;
+      });
+      return res.json(redacted);
+    }
     return res.json(affiliates);
   } catch (e) {
     console.error(e);
@@ -643,11 +874,6 @@ router.get("/affiliates/:id", async (req, res) => {
       return res.status(404).json({ error: "Afiliado no encontrado" });
     }
 
-    const [directCount, networkSize] = await Promise.all([
-      countDirectReferrals(pool, id),
-      countNetworkDownline(pool, id),
-    ]);
-
     const bd =
       row.birth_date instanceof Date
         ? row.birth_date.toISOString().slice(0, 10)
@@ -661,6 +887,78 @@ router.get("/affiliates/:id", async (req, res) => {
           ? String(row.contract_issue_date).slice(0, 10)
           : null;
 
+    let sponsor = null;
+    if (row.sponsor_id) {
+      try {
+        const sp = await pool.query(
+          `SELECT full_name, doc_number, referral_code FROM users WHERE id = $1::uuid`,
+          [row.sponsor_id]
+        );
+        if (sp.rows[0]) {
+          sponsor = {
+            fullName: sp.rows[0].full_name,
+            docNumber: sp.rows[0].doc_number,
+            refCode: sp.rows[0].referral_code,
+          };
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }
+
+    if (req.adminCtx?.role === "secretary") {
+      const affiliateSec = {
+        id: row.id,
+        docNumber: row.doc_number,
+        docType: row.doc_type,
+        fullName: row.full_name,
+        email: row.email,
+        planId: row.plan_id,
+        refCode: row.referral_code,
+        sponsorId: row.sponsor_id,
+        sponsor,
+        address: row.address,
+        city: row.city,
+        department: row.department,
+        phone: row.phone,
+        whatsapp: row.whatsapp,
+        birthDate: bd,
+        contractIssueDate: Object.prototype.hasOwnProperty.call(row, "contract_issue_date") ? cfd : null,
+        affiliationPaidAt: row.affiliation_paid_at
+          ? row.affiliation_paid_at instanceof Date
+            ? row.affiliation_paid_at.toISOString()
+            : String(row.affiliation_paid_at)
+          : null,
+        monthlyPaidThrough: row.monthly_paid_through ?? null,
+        beneficiaries: row.beneficiaries || [],
+        pets: row.pets || [],
+        createdAt: row.created_at,
+      };
+      const payRow = await pool.query(
+        `SELECT affiliation_paid_at, monthly_paid_through FROM users WHERE id = $1`,
+        [id]
+      );
+      const payment = payRow.rows[0] ? paymentFlagsFromRowAdm(payRow.rows[0]) : null;
+      await logAdminAudit(req, "affiliates.view_detail", {
+        userId: id,
+        referralCode: affiliateSec.refCode,
+        docNumber: affiliateSec.docNumber,
+        fullName: affiliateSec.fullName,
+        mora: payment?.mora ?? null,
+        moraReason: payment?.moraReason ?? null,
+      });
+      return res.json({
+        affiliate: { ...affiliateSec, payment },
+        referrals: { level1: [], level2: [], level3: [] },
+        scope: "secretary",
+      });
+    }
+
+    const [directCount, networkSize] = await Promise.all([
+      countDirectReferrals(pool, id),
+      countNetworkDownline(pool, id),
+    ]);
+
     const affiliate = {
       id: row.id,
       docNumber: row.doc_number,
@@ -670,6 +968,7 @@ router.get("/affiliates/:id", async (req, res) => {
       planId: row.plan_id,
       refCode: row.referral_code,
       sponsorId: row.sponsor_id,
+      sponsor,
       address: row.address,
       city: row.city,
       department: row.department,
@@ -785,6 +1084,15 @@ router.get("/affiliates/:id", async (req, res) => {
       if (e.code !== "42P01") throw e;
     }
 
+    await logAdminAudit(req, "affiliates.view_detail", {
+      userId: id,
+      referralCode: affiliate.refCode,
+      docNumber: affiliate.docNumber,
+      fullName: affiliate.fullName,
+      mora: payment?.mora ?? null,
+      moraReason: payment?.moraReason ?? null,
+    });
+
     return res.json({
       affiliate: {
         ...affiliate,
@@ -803,7 +1111,7 @@ router.get("/affiliates/:id", async (req, res) => {
 });
 
 /** Resumen para panel Reportes (mora, solicitudes, cierre) */
-router.get("/reports/summary", async (_req, res) => {
+router.get("/reports/summary", requireOwner, async (_req, res) => {
   const cur = currentPeriodMonthAdm();
   const todayBog = todayYmdBogota();
   const covEnd = pgCoverageEndDateExpr("monthly_paid_through");
@@ -899,7 +1207,7 @@ router.get("/reports/summary", async (_req, res) => {
 });
 
 /** Datos para exportar reporte mensual (CSV / análisis) */
-router.get("/reports/data/monthly", async (req, res) => {
+router.get("/reports/data/monthly", requireOwner, async (req, res) => {
   const month = String(req.query.month || "").trim();
   if (!/^\d{4}-\d{2}$/.test(month)) {
     return res.status(400).json({ error: "Indica month=YYYY-MM" });
@@ -1025,7 +1333,7 @@ router.get("/reports/data/monthly", async (req, res) => {
 });
 
 /** Balance anual: comisiones y altas por mes + totales (crecimiento) */
-router.get("/reports/data/annual", async (req, res) => {
+router.get("/reports/data/annual", requireOwner, async (req, res) => {
   const year = String(req.query.year || "").trim();
   if (!/^\d{4}$/.test(year)) {
     return res.status(400).json({ error: "Indica year=YYYY" });
@@ -1143,7 +1451,7 @@ router.get("/reports/data/annual", async (req, res) => {
 });
 
 /** Comisiones por asociado en un mes (N1/N2/N3 + estado de pago) */
-router.get("/commissions/by-affiliate", async (req, res) => {
+router.get("/commissions/by-affiliate", requireOwner, async (req, res) => {
   const month = String(req.query.month || "").trim();
   const showAll = req.query.all === "1";
   if (!/^\d{4}-\d{2}$/.test(month)) {
@@ -1213,7 +1521,7 @@ router.get("/commissions/by-affiliate", async (req, res) => {
 });
 
 /** Cierre mensual: anula comisiones del mes para quien no esté al día con la mensualidad a esa fecha. */
-router.post("/commissions/close-month", async (req, res) => {
+router.post("/commissions/close-month", requireOwner, async (req, res) => {
   const month = String(req.body?.month || "").trim();
   if (!/^\d{4}-\d{2}$/.test(month)) {
     return res.status(400).json({ error: "Envía month en formato YYYY-MM" });
@@ -1247,6 +1555,7 @@ router.post("/commissions/close-month", async (req, res) => {
       }
     }
     await client.query("COMMIT");
+    await logAdminAudit(req, "commissions.close_month", { month, linesForfeited: forfeited });
     return res.json({ ok: true, month, linesForfeited: forfeited });
   } catch (e) {
     await client.query("ROLLBACK");
@@ -1261,7 +1570,7 @@ router.post("/commissions/close-month", async (req, res) => {
 });
 
 /** Autoriza desembolso (solo si el afiliado está al día y hay saldo) */
-router.post("/disbursements/authorize", async (req, res) => {
+router.post("/disbursements/authorize", requireOwner, async (req, res) => {
   const userId = String(req.body?.userId || "").trim();
   const amountPesos = Number(req.body?.amountPesos);
   const note = req.body?.note != null ? String(req.body.note).slice(0, 500) : null;
@@ -1276,13 +1585,14 @@ router.post("/disbursements/authorize", async (req, res) => {
   }
   try {
     const ur = await pool.query(
-      `SELECT affiliation_paid_at, monthly_paid_through FROM users WHERE id = $1::uuid`,
+      `SELECT affiliation_paid_at, monthly_paid_through, referral_code, doc_number, full_name FROM users WHERE id = $1::uuid`,
       [userId]
     );
     if (!ur.rows.length) {
       return res.status(404).json({ error: "Usuario no encontrado" });
     }
-    const pf = paymentFlagsFromRowAdm(ur.rows[0]);
+    const urow = ur.rows[0];
+    const pf = paymentFlagsFromRowAdm(urow);
     if (!pf.receivesCommission) {
       return res.status(400).json({ error: "El afiliado no está al día; no se puede autorizar desembolso." });
     }
@@ -1296,6 +1606,15 @@ router.post("/disbursements/authorize", async (req, res) => {
        RETURNING id, created_at`,
       [userId, amountCents, periodMonth || null, note]
     );
+    await logAdminAudit(req, "disbursements.authorize", {
+      disbursementId: ins.rows[0].id,
+      beneficiaryUserId: userId,
+      docNumber: urow.doc_number,
+      referralCode: urow.referral_code ?? null,
+      fullName: urow.full_name,
+      amountPesos,
+      periodMonth: periodMonth || null,
+    });
     return res.json({
       ok: true,
       id: ins.rows[0].id,
@@ -1310,7 +1629,7 @@ router.post("/disbursements/authorize", async (req, res) => {
   }
 });
 
-router.post("/disbursements/:id/mark-paid", async (req, res) => {
+router.post("/disbursements/:id/mark-paid", requireOwner, async (req, res) => {
   const { id } = req.params;
   try {
     const r = await pool.query(
@@ -1320,6 +1639,7 @@ router.post("/disbursements/:id/mark-paid", async (req, res) => {
     if (!r.rows.length) {
       return res.status(404).json({ error: "Desembolso no encontrado o ya pagado" });
     }
+    await logAdminAudit(req, "disbursements.mark_paid", { disbursementId: id });
     return res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -1330,7 +1650,7 @@ router.post("/disbursements/:id/mark-paid", async (req, res) => {
   }
 });
 
-router.get("/contract-requests", async (_req, res) => {
+router.get("/contract-requests", requireOwner, async (_req, res) => {
   try {
     const r = await pool.query(
       `SELECT cr.id, cr.user_id, cr.proposed_beneficiaries, cr.proposed_pets, cr.note, cr.status,
@@ -1366,7 +1686,7 @@ router.get("/contract-requests", async (_req, res) => {
   }
 });
 
-router.post("/contract-requests/:id/approve", async (req, res) => {
+router.post("/contract-requests/:id/approve", requireOwner, async (req, res) => {
   const { id } = req.params;
   const resolvedNote = req.body?.resolvedNote != null ? String(req.body.resolvedNote).slice(0, 500) : null;
   const client = await pool.connect();
@@ -1399,6 +1719,10 @@ router.post("/contract-requests/:id/approve", async (req, res) => {
       [id, resolvedNote]
     );
     await client.query("COMMIT");
+    await logAdminAudit(req, "contract_requests.approve", {
+      requestId: id,
+      affiliateUserId: reqRow.user_id,
+    });
     return res.json({ ok: true });
   } catch (e) {
     await client.query("ROLLBACK");
@@ -1412,7 +1736,7 @@ router.post("/contract-requests/:id/approve", async (req, res) => {
   }
 });
 
-router.post("/contract-requests/:id/reject", async (req, res) => {
+router.post("/contract-requests/:id/reject", requireOwner, async (req, res) => {
   const { id } = req.params;
   const resolvedNote = req.body?.resolvedNote != null ? String(req.body.resolvedNote).slice(0, 500) : null;
   try {
@@ -1424,6 +1748,7 @@ router.post("/contract-requests/:id/reject", async (req, res) => {
     if (!r.rows.length) {
       return res.status(400).json({ error: "Solicitud no pendiente o inexistente" });
     }
+    await logAdminAudit(req, "contract_requests.reject", { requestId: id });
     return res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -1432,7 +1757,7 @@ router.post("/contract-requests/:id/reject", async (req, res) => {
 });
 
 /** Solo admin: fecha del contrato (no debe cambiar al reimprimir; solo desde aquí) */
-router.patch("/affiliates/:id/contract-date", async (req, res) => {
+router.patch("/affiliates/:id/contract-date", requireOwner, async (req, res) => {
   try {
     const { id } = req.params;
     const d = String(req.body?.contractIssueDate || "").trim();
@@ -1440,12 +1765,20 @@ router.patch("/affiliates/:id/contract-date", async (req, res) => {
       return res.status(400).json({ error: "Usa fecha YYYY-MM-DD" });
     }
     const r = await pool.query(
-      `UPDATE users SET contract_issue_date = $1::date, updated_at = NOW() WHERE id = $2 RETURNING id`,
+      `UPDATE users SET contract_issue_date = $1::date, updated_at = NOW() WHERE id = $2::uuid RETURNING id, referral_code, doc_number, full_name`,
       [d, id]
     );
     if (!r.rows.length) {
       return res.status(404).json({ error: "Afiliado no encontrado" });
     }
+    const row = r.rows[0];
+    await logAdminAudit(req, "affiliates.contract_date", {
+      affiliateUserId: row.id,
+      docNumber: row.doc_number,
+      referralCode: row.referral_code ?? null,
+      fullName: row.full_name,
+      contractIssueDate: d,
+    });
     return res.json({ ok: true, contractIssueDate: d });
   } catch (e) {
     console.error(e);
@@ -1457,7 +1790,7 @@ router.patch("/affiliates/:id/contract-date", async (req, res) => {
 });
 
 /** Inscripciones a cursos — Academia */
-router.get("/academy/registrations", async (_req, res) => {
+router.get("/academy/registrations", requireOwner, async (_req, res) => {
   try {
     const r = await pool.query(
       `SELECT id, affiliate_user_id, full_name, email, phone, course_interest, notes, status, created_at
@@ -1472,7 +1805,7 @@ router.get("/academy/registrations", async (_req, res) => {
 });
 
 /** Crear aviso / oferta de curso para afiliados */
-router.post("/academy/broadcasts", async (req, res) => {
+router.post("/academy/broadcasts", requireOwner, async (req, res) => {
   const title = String(req.body?.title || "").trim();
   const body = String(req.body?.body || "").trim().slice(0, 4000);
   const courseName = String(req.body?.courseName || "").trim().slice(0, 200);
@@ -1488,6 +1821,10 @@ router.post("/academy/broadcasts", async (req, res) => {
        VALUES ($1, $2, $3, $4) RETURNING id, title, body, course_name, start_date, created_at`,
       [title, body || null, courseName || null, sd]
     );
+    await logAdminAudit(req, "academy.broadcast_create", {
+      broadcastId: ins.rows[0].id,
+      title: ins.rows[0].title,
+    });
     return res.json({ broadcast: ins.rows[0] });
   } catch (e) {
     console.error(e);
@@ -1498,7 +1835,7 @@ router.post("/academy/broadcasts", async (req, res) => {
   }
 });
 
-router.get("/academy/broadcasts", async (_req, res) => {
+router.get("/academy/broadcasts", requireOwner, async (_req, res) => {
   try {
     const r = await pool.query(
       `SELECT id, title, body, course_name, start_date, active, created_at
