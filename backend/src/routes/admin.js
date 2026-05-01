@@ -60,9 +60,7 @@ function readSecretaryEnvCreds() {
 
 /** Recorta espacios/saltos: en paneles cloud a veces se copian secretos con \\n final. */
 const ADMIN_USER = normalizeAdminEnv(process.env.ADMIN_USER) || "admin";
-const ADMIN_PASSWORD = normalizeAdminEnv(process.env.ADMIN_PASSWORD) || "admin123";
-const ADMIN_FALLBACK_USER = "admin";
-const ADMIN_FALLBACK_PASSWORD = "admin123";
+const ADMIN_PASSWORD = normalizeAdminEnv(process.env.ADMIN_PASSWORD) || "__no_admin_password_set__";
 
 try {
   const s = readSecretaryEnvCreds();
@@ -75,8 +73,7 @@ try {
  * Login admin:
  * 1) `ADMIN_SECRETARY_USER` / `ADMIN_SECRETARY_PASSWORD` (o DMIN_*) en .env → **secretary** (antes que BD: evita choque con `admin_accounts`)
  * 2) Cuenta en `admin_accounts` (bcrypt), rol owner o secretary
- * 3) `admin` / `admin123` (respaldo) → **secretary**
- * 4) `ADMIN_USER` / `ADMIN_PASSWORD` → **owner**
+ * 3) `ADMIN_USER` / `ADMIN_PASSWORD` → **owner**
  */
 router.post("/login", async (req, res) => {
   const rawUser = req.body?.user ?? req.body?.username ?? "";
@@ -123,17 +120,6 @@ router.post("/login", async (req, res) => {
     }
   } catch (e) {
     if (e.code !== "42P01") console.error(e);
-  }
-  const matchFallback =
-    user.toLowerCase() === ADMIN_FALLBACK_USER &&
-    password.toLowerCase() === ADMIN_FALLBACK_PASSWORD.toLowerCase();
-  if (matchFallback) {
-    const token = jwt.sign(
-      { admin: true, aid: null, role: "secretary", u: ADMIN_FALLBACK_USER },
-      JWT_SECRET,
-      { expiresIn: "8h" }
-    );
-    return res.json({ token, role: "secretary", username: ADMIN_FALLBACK_USER });
   }
   const matchEnv =
     user.toLowerCase() === String(ADMIN_USER).toLowerCase() &&
