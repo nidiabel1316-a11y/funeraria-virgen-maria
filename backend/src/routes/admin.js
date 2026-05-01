@@ -324,11 +324,52 @@ router.get("/stats", async (req, res) => {
         if (e.code !== "42703") throw e;
       }
       const retentionPct = total > 0 ? Math.round((affiliated / total) * 1000) / 10 : 0;
+      // Caja del día y del mes — solo movimientos registrados por esta secretaria
+      let myCashTodayPesos = 0;
+      let myCashTodayCount = 0;
+      let myCashMonthPesos = 0;
+      let myCashMonthCount = 0;
+      const myUser = String(req.adminCtx?.username || "").trim();
+      try {
+        const t = await pool.query(
+          `SELECT
+             COALESCE(SUM(amount_cents) FILTER (
+               WHERE ((created_at AT TIME ZONE 'America/Bogota')::date)
+                   = (NOW() AT TIME ZONE 'America/Bogota')::date
+             ), 0)::bigint AS day_t,
+             COUNT(*) FILTER (
+               WHERE ((created_at AT TIME ZONE 'America/Bogota')::date)
+                   = (NOW() AT TIME ZONE 'America/Bogota')::date
+             )::int AS day_n,
+             COALESCE(SUM(amount_cents) FILTER (
+               WHERE to_char((created_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM')
+                   = to_char((NOW() AT TIME ZONE 'America/Bogota'), 'YYYY-MM')
+             ), 0)::bigint AS m_t,
+             COUNT(*) FILTER (
+               WHERE to_char((created_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM')
+                   = to_char((NOW() AT TIME ZONE 'America/Bogota'), 'YYYY-MM')
+             )::int AS m_n
+           FROM admin_cash_payments
+           WHERE LOWER(COALESCE(registered_by_username,'')) = LOWER($1)`,
+          [myUser]
+        );
+        myCashTodayPesos = Math.round(Number(t.rows[0].day_t) / 100);
+        myCashTodayCount = Number(t.rows[0].day_n);
+        myCashMonthPesos = Math.round(Number(t.rows[0].m_t) / 100);
+        myCashMonthCount = Number(t.rows[0].m_n);
+      } catch (e) {
+        // 42P01: tabla aún no creada · 42703: columna registered_by_username aún no creada
+        if (e.code !== "42P01" && e.code !== "42703") throw e;
+      }
       return res.json({
         scope: "secretary",
         totalUsers: total,
         affiliatedUsers: affiliated,
         retentionPct,
+        myCashTodayPesos,
+        myCashTodayCount,
+        myCashMonthPesos,
+        myCashMonthCount,
       });
     }
 
@@ -376,11 +417,37 @@ router.get("/stats", async (req, res) => {
     const total = Number(row.total);
     const retentionPct = total > 0 ? Math.round((affiliated / total) * 1000) / 10 : 0;
     let cashCollectedPesos = 0;
+    let cashTodayPesos = 0;
+    let cashTodayCount = 0;
+    let cashMonthPesos = 0;
+    let cashMonthCount = 0;
     try {
       const c = await pool.query(
-        `SELECT COALESCE(SUM(amount_cents), 0)::bigint AS t FROM admin_cash_payments`
+        `SELECT
+           COALESCE(SUM(amount_cents), 0)::bigint AS all_t,
+           COALESCE(SUM(amount_cents) FILTER (
+             WHERE ((created_at AT TIME ZONE 'America/Bogota')::date)
+                 = (NOW() AT TIME ZONE 'America/Bogota')::date
+           ), 0)::bigint AS day_t,
+           COUNT(*) FILTER (
+             WHERE ((created_at AT TIME ZONE 'America/Bogota')::date)
+                 = (NOW() AT TIME ZONE 'America/Bogota')::date
+           )::int AS day_n,
+           COALESCE(SUM(amount_cents) FILTER (
+             WHERE to_char((created_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM')
+                 = to_char((NOW() AT TIME ZONE 'America/Bogota'), 'YYYY-MM')
+           ), 0)::bigint AS m_t,
+           COUNT(*) FILTER (
+             WHERE to_char((created_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM')
+                 = to_char((NOW() AT TIME ZONE 'America/Bogota'), 'YYYY-MM')
+           )::int AS m_n
+         FROM admin_cash_payments`
       );
-      cashCollectedPesos = Math.round(Number(c.rows[0].t) / 100);
+      cashCollectedPesos = Math.round(Number(c.rows[0].all_t) / 100);
+      cashTodayPesos = Math.round(Number(c.rows[0].day_t) / 100);
+      cashTodayCount = Number(c.rows[0].day_n);
+      cashMonthPesos = Math.round(Number(c.rows[0].m_t) / 100);
+      cashMonthCount = Number(c.rows[0].m_n);
     } catch (e) {
       if (e.code !== "42P01") throw e;
     }
@@ -395,6 +462,10 @@ router.get("/stats", async (req, res) => {
       totalBalanceCents: Number(row.total_balance_cents),
       commissionsFromLinesPesos,
       cashCollectedPesos,
+      cashTodayPesos,
+      cashTodayCount,
+      cashMonthPesos,
+      cashMonthCount,
       retentionPct,
     });
   } catch (e) {
@@ -420,22 +491,47 @@ async function adminCashPaymentsHasRegistrarColumn() {
   return _cashPayHasRegistrarCol;
 }
 
-/** Listado de pagos en efectivo. ?date=YYYY-MM-DD (día calendario America/Bogota) + totales del día; ?registrar= (solo owner) filtra por quien registró. */
+/** True si existe la columna payment_channel (migración opcional). */
+let _cashPayHasChannelCol = null;
+async function adminCashPaymentsHasChannelColumn() {
+  if (_cashPayHasChannelCol !== null) return _cashPayHasChannelCol;
+  try {
+    const r = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'admin_cash_payments' AND column_name = 'payment_channel'
+       LIMIT 1`
+    );
+    _cashPayHasChannelCol = r.rowCount > 0;
+  } catch {
+    _cashPayHasChannelCol = false;
+  }
+  return _cashPayHasChannelCol;
+}
+
+/** Listado de pagos de caja. ?date=YYYY-MM-DD (día calendario America/Bogota) + totales del día; ?registrar= (solo owner) filtra por quien registró; ?channel=cash|consignment filtra por medio. La secretaría siempre ve solo sus propios movimientos (filtro forzado). */
 router.get("/payments/cash", async (req, res) => {
   const limRaw = parseInt(String(req.query.limit || "80"), 10);
   const limit = Number.isFinite(limRaw) ? Math.min(200, Math.max(1, limRaw)) : 80;
   const dateRaw = String(req.query.date || "").trim();
   const registrarRaw = String(req.query.registrar || "").trim();
+  const channelRaw = String(req.query.channel || "").trim().toLowerCase();
+  const channelFilter = ["cash", "consignment"].includes(channelRaw) ? channelRaw : "";
   let dateFilter = null;
   if (dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) {
     dateFilter = dateRaw;
   }
-  if (registrarRaw && req.adminCtx?.role !== "owner") {
+  const isSecretary = req.adminCtx?.role === "secretary";
+  // La secretaría no puede filtrar por otro registrador: el filtro se fuerza a su propio usuario.
+  if (registrarRaw && !isSecretary && req.adminCtx?.role !== "owner") {
     return res.status(403).json({ error: "Solo el administrador principal puede filtrar por registrador." });
   }
-  const regNorm = registrarRaw ? normalizeAdminBody(registrarRaw) : "";
+  let regNorm = registrarRaw ? normalizeAdminBody(registrarRaw) : "";
+  if (isSecretary) {
+    regNorm = String(req.adminCtx?.username || "").trim();
+  }
   try {
     const hasRegCol = await adminCashPaymentsHasRegistrarColumn();
+    const hasChannelCol = await adminCashPaymentsHasChannelColumn();
     const conds = [];
     const params = [];
     let pi = 1;
@@ -449,6 +545,17 @@ router.get("/payments/cash", async (req, res) => {
       params.push(regNorm);
       pi++;
     }
+    if (channelFilter) {
+      if (!hasChannelCol) {
+        return res.status(503).json({
+          error:
+            "Ejecuta en Neon: db/migrate_admin_cash_payment_channel.sql para filtrar por medio de pago.",
+        });
+      }
+      conds.push(`COALESCE(p.payment_channel,'cash') = $${pi}`);
+      params.push(channelFilter);
+      pi++;
+    }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 
     let daySummary = null;
@@ -459,12 +566,18 @@ router.get("/payments/cash", async (req, res) => {
         sumWhere += ` AND LOWER(COALESCE(p.registered_by_username,'')) = LOWER($2)`;
         sumParams.push(regNorm);
       }
+      if (channelFilter && hasChannelCol) {
+        sumWhere += ` AND COALESCE(p.payment_channel,'cash') = $${sumParams.length + 1}`;
+        sumParams.push(channelFilter);
+      }
       const sq = await pool.query(
         `SELECT
            COALESCE(SUM(amount_cents), 0)::bigint AS total_cents,
            COUNT(*)::int AS n,
            COALESCE(SUM(amount_cents) FILTER (WHERE payment_type = 'affiliation'), 0)::bigint AS aff_cents,
-           COALESCE(SUM(amount_cents) FILTER (WHERE payment_type = 'monthly'), 0)::bigint AS mon_cents
+           COALESCE(SUM(amount_cents) FILTER (WHERE payment_type = 'monthly'), 0)::bigint AS mon_cents,
+           COALESCE(SUM(amount_cents) FILTER (WHERE COALESCE(payment_channel,'cash') = 'cash'), 0)::bigint AS cash_cents,
+           COALESCE(SUM(amount_cents) FILTER (WHERE COALESCE(payment_channel,'cash') = 'consignment'), 0)::bigint AS cons_cents
          FROM admin_cash_payments p
          ${sumWhere}`,
         sumParams
@@ -476,16 +589,23 @@ router.get("/payments/cash", async (req, res) => {
         count: Number(sr.n),
         affiliationPesos: Math.round(Number(sr.aff_cents) / 100),
         monthlyPesos: Math.round(Number(sr.mon_cents) / 100),
+        cashPesos: Math.round(Number(sr.cash_cents) / 100),
+        consignmentPesos: Math.round(Number(sr.cons_cents) / 100),
       };
     }
 
     params.push(limit);
     const limPh = `$${pi}`;
-    const regSel = hasRegCol ? ", p.registered_by_username" : "";
+    const optSel = [
+      hasRegCol ? "p.registered_by_username" : null,
+      hasChannelCol ? "p.payment_channel" : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+    const optSelSql = optSel ? `, ${optSel}` : "";
     const r = await pool.query(
       `SELECT p.id, p.doc_number, p.full_name, p.payment_type, p.amount_cents, p.months_count,
-              p.monthly_paid_through_before, p.monthly_paid_through_after, p.note, p.created_at
-              ${regSel},
+              p.monthly_paid_through_before, p.monthly_paid_through_after, p.note, p.created_at${optSelSql},
               u.affiliation_paid_at
        FROM admin_cash_payments p
        LEFT JOIN users u ON u.id = p.user_id
@@ -513,6 +633,11 @@ router.get("/payments/cash", async (req, res) => {
       note: row.note,
       createdAt: row.created_at,
       registeredBy: hasRegCol ? row.registered_by_username || null : null,
+      paymentChannel: hasChannelCol
+        ? row.payment_channel === "consignment"
+          ? "consignment"
+          : "cash"
+        : "cash",
     }));
     const out = { items };
     if (daySummary) out.daySummary = daySummary;
@@ -534,6 +659,8 @@ router.post("/payments/cash", async (req, res) => {
   const userIdRaw = req.body?.userId != null ? String(req.body.userId).trim() : "";
   const hasUserId = /^[0-9a-fA-F-]{36}$/.test(userIdRaw);
   const paymentType = String(req.body?.paymentType || "").trim();
+  const paymentChannelRaw = String(req.body?.paymentChannel || "").trim().toLowerCase();
+  const paymentChannel = paymentChannelRaw || "cash";
   const amountPesos = Number(req.body?.amountPesos);
   const note = req.body?.note != null ? String(req.body.note).slice(0, 500) : null;
   const monthsRaw = Number(req.body?.months);
@@ -543,6 +670,9 @@ router.post("/payments/cash", async (req, res) => {
   }
   if (!["affiliation", "monthly"].includes(paymentType)) {
     return res.status(400).json({ error: "paymentType debe ser affiliation o monthly" });
+  }
+  if (!["cash", "consignment"].includes(paymentChannel)) {
+    return res.status(400).json({ error: "paymentChannel debe ser cash o consignment" });
   }
   if (!Number.isFinite(amountPesos) || amountPesos <= 0) {
     return res.status(400).json({ error: "Monto inválido" });
@@ -554,6 +684,13 @@ router.post("/payments/cash", async (req, res) => {
   const client = await pool.connect();
   try {
     const hasRegCol = await adminCashPaymentsHasRegistrarColumn();
+    const hasChannelCol = await adminCashPaymentsHasChannelColumn();
+    if (!hasChannelCol && paymentChannel !== "cash") {
+      return res.status(503).json({
+        error:
+          "Ejecuta en Neon: db/migrate_admin_cash_payment_channel.sql para registrar consignación en caja.",
+      });
+    }
     await client.query("BEGIN");
     const qr = hasUserId
       ? await client.query(
@@ -600,42 +737,85 @@ router.post("/payments/cash", async (req, res) => {
       const refreshed = await client.query(`SELECT monthly_paid_through FROM users WHERE id = $1::uuid`, [u.id]);
       const newMonthlyPaidThrough = refreshed.rows[0]?.monthly_paid_through;
       if (hasRegCol) {
-        await client.query(
-          `INSERT INTO admin_cash_payments (
-             user_id, doc_number, full_name, payment_type, amount_cents, months_count,
-             monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
-           ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-          [
-            u.id,
-            u.doc_number,
-            u.full_name,
-            paymentType,
-            amountCents,
-            1,
-            beforeForLog,
-            newMonthlyPaidThrough,
-            note,
-            registeredBy || null,
-          ]
-        );
+        if (hasChannelCol) {
+          await client.query(
+            `INSERT INTO admin_cash_payments (
+               user_id, doc_number, full_name, payment_type, payment_channel, amount_cents, months_count,
+               monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
+             ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            [
+              u.id,
+              u.doc_number,
+              u.full_name,
+              paymentType,
+              paymentChannel,
+              amountCents,
+              1,
+              beforeForLog,
+              newMonthlyPaidThrough,
+              note,
+              registeredBy || null,
+            ]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO admin_cash_payments (
+               user_id, doc_number, full_name, payment_type, amount_cents, months_count,
+               monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
+             ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+            [
+              u.id,
+              u.doc_number,
+              u.full_name,
+              paymentType,
+              amountCents,
+              1,
+              beforeForLog,
+              newMonthlyPaidThrough,
+              note,
+              registeredBy || null,
+            ]
+          );
+        }
       } else {
-        await client.query(
-          `INSERT INTO admin_cash_payments (
-             user_id, doc_number, full_name, payment_type, amount_cents, months_count,
-             monthly_paid_through_before, monthly_paid_through_after, note
-           ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [
-            u.id,
-            u.doc_number,
-            u.full_name,
-            paymentType,
-            amountCents,
-            1,
-            beforeForLog,
-            newMonthlyPaidThrough,
-            note,
-          ]
-        );
+        if (hasChannelCol) {
+          await client.query(
+            `INSERT INTO admin_cash_payments (
+               user_id, doc_number, full_name, payment_type, payment_channel, amount_cents, months_count,
+               monthly_paid_through_before, monthly_paid_through_after, note
+             ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+            [
+              u.id,
+              u.doc_number,
+              u.full_name,
+              paymentType,
+              paymentChannel,
+              amountCents,
+              1,
+              beforeForLog,
+              newMonthlyPaidThrough,
+              note,
+            ]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO admin_cash_payments (
+               user_id, doc_number, full_name, payment_type, amount_cents, months_count,
+               monthly_paid_through_before, monthly_paid_through_after, note
+             ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            [
+              u.id,
+              u.doc_number,
+              u.full_name,
+              paymentType,
+              amountCents,
+              1,
+              beforeForLog,
+              newMonthlyPaidThrough,
+              note,
+            ]
+          );
+        }
       }
       await client.query("COMMIT");
       await logAdminAudit(req, "payments.cash", {
@@ -645,6 +825,7 @@ router.post("/payments/cash", async (req, res) => {
         referralCode: u.referral_code ?? null,
         fullName: u.full_name,
         amountPesos,
+        paymentChannel,
         commissionsApplied: out.applied,
         registeredBy: registeredBy || null,
       });
@@ -654,6 +835,7 @@ router.post("/payments/cash", async (req, res) => {
         docNumber: u.doc_number,
         fullName: u.full_name,
         paymentType,
+        paymentChannel,
         monthlyPaidThrough: newMonthlyPaidThrough,
         commissionsApplied: out.applied,
       });
@@ -674,42 +856,85 @@ router.post("/payments/cash", async (req, res) => {
       [paidThrough, u.id]
     );
     if (hasRegCol) {
-      await client.query(
-        `INSERT INTO admin_cash_payments (
-           user_id, doc_number, full_name, payment_type, amount_cents, months_count,
-           monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
-         ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [
-          u.id,
-          u.doc_number,
-          u.full_name,
-          paymentType,
-          amountCents,
-          months,
-          beforeForLog,
-          paidThrough,
-          note,
-          registeredBy || null,
-        ]
-      );
+      if (hasChannelCol) {
+        await client.query(
+          `INSERT INTO admin_cash_payments (
+             user_id, doc_number, full_name, payment_type, payment_channel, amount_cents, months_count,
+             monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
+           ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          [
+            u.id,
+            u.doc_number,
+            u.full_name,
+            paymentType,
+            paymentChannel,
+            amountCents,
+            months,
+            beforeForLog,
+            paidThrough,
+            note,
+            registeredBy || null,
+          ]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO admin_cash_payments (
+             user_id, doc_number, full_name, payment_type, amount_cents, months_count,
+             monthly_paid_through_before, monthly_paid_through_after, note, registered_by_username
+           ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [
+            u.id,
+            u.doc_number,
+            u.full_name,
+            paymentType,
+            amountCents,
+            months,
+            beforeForLog,
+            paidThrough,
+            note,
+            registeredBy || null,
+          ]
+        );
+      }
     } else {
-      await client.query(
-        `INSERT INTO admin_cash_payments (
-           user_id, doc_number, full_name, payment_type, amount_cents, months_count,
-           monthly_paid_through_before, monthly_paid_through_after, note
-         ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [
-          u.id,
-          u.doc_number,
-          u.full_name,
-          paymentType,
-          amountCents,
-          months,
-          beforeForLog,
-          paidThrough,
-          note,
-        ]
-      );
+      if (hasChannelCol) {
+        await client.query(
+          `INSERT INTO admin_cash_payments (
+             user_id, doc_number, full_name, payment_type, payment_channel, amount_cents, months_count,
+             monthly_paid_through_before, monthly_paid_through_after, note
+           ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [
+            u.id,
+            u.doc_number,
+            u.full_name,
+            paymentType,
+            paymentChannel,
+            amountCents,
+            months,
+            beforeForLog,
+            paidThrough,
+            note,
+          ]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO admin_cash_payments (
+             user_id, doc_number, full_name, payment_type, amount_cents, months_count,
+             monthly_paid_through_before, monthly_paid_through_after, note
+           ) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            u.id,
+            u.doc_number,
+            u.full_name,
+            paymentType,
+            amountCents,
+            months,
+            beforeForLog,
+            paidThrough,
+            note,
+          ]
+        );
+      }
     }
     await client.query("COMMIT");
     await logAdminAudit(req, "payments.cash", {
@@ -720,6 +945,7 @@ router.post("/payments/cash", async (req, res) => {
       fullName: u.full_name,
       amountPesos,
       months,
+      paymentChannel,
       registeredBy: registeredBy || null,
     });
     return res.json({
@@ -728,6 +954,7 @@ router.post("/payments/cash", async (req, res) => {
       docNumber: u.doc_number,
       fullName: u.full_name,
       paymentType,
+      paymentChannel,
       months,
       monthlyPaidThrough: paidThrough,
     });
@@ -747,7 +974,7 @@ router.post("/payments/cash", async (req, res) => {
       }
       return res.status(503).json({ error: "Ejecuta migrate_payment_affiliation.sql y luego migrate_admin_cash_payments.sql" });
     }
-    return res.status(500).json({ error: "No se pudo registrar el pago en efectivo" });
+    return res.status(500).json({ error: "No se pudo registrar el pago de caja" });
   } finally {
     client.release();
   }
@@ -2002,6 +2229,648 @@ router.get("/academy/broadcasts", requireOwner, async (_req, res) => {
   } catch (e) {
     if (e.code === "42P01") return res.json({ broadcasts: [] });
     return res.status(500).json({ error: "Error" });
+  }
+});
+
+/* ===========================================================================
+ * CIERRES DE CAJA — snapshots inmutables
+ * -----------------------------------------------------------------------
+ * - Secretaria: hace POST /closures/daily → guarda su cierre del día.
+ * - Owner: hace POST /closures/monthly → guarda el cierre del mes.
+ * - Una vez guardado, NO se modifica.
+ * - El listado y el detalle (GET) se usan para que el admin descargue PDF.
+ * =========================================================================*/
+
+/** Verifica si la tabla cash_closures existe (la migración pudo no haberse ejecutado). */
+let _cashClosuresTableExists = null;
+async function cashClosuresTableExists() {
+  if (_cashClosuresTableExists !== null) return _cashClosuresTableExists;
+  try {
+    const r = await pool.query(
+      `SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'cash_closures' LIMIT 1`
+    );
+    _cashClosuresTableExists = r.rowCount > 0;
+  } catch {
+    _cashClosuresTableExists = false;
+  }
+  return _cashClosuresTableExists;
+}
+
+/** Construye el snapshot del cierre diario sin guardarlo en BD (función reutilizable). */
+async function buildDailyClosureData({ adminCtx, dateRaw, registrarRaw }) {
+  const dateFilter = /^\d{4}-\d{2}-\d{2}$/.test(String(dateRaw || "").trim())
+    ? String(dateRaw).trim()
+    : null;
+  const isSecretary = adminCtx?.role === "secretary";
+  let regFilter = registrarRaw ? normalizeAdminBody(String(registrarRaw)) : "";
+  if (isSecretary) {
+    regFilter = String(adminCtx?.username || "").trim();
+  }
+
+  const hasRegCol = await adminCashPaymentsHasRegistrarColumn();
+  const hasChannelCol = await adminCashPaymentsHasChannelColumn();
+  const conds = [];
+  const params = [];
+  let pi = 1;
+
+  // Día (zona Bogotá). Si no se pasó, se usa hoy.
+  if (dateFilter) {
+    conds.push(`((p.created_at AT TIME ZONE 'America/Bogota')::date) = $${pi}::date`);
+    params.push(dateFilter);
+    pi++;
+  } else {
+    conds.push(`((p.created_at AT TIME ZONE 'America/Bogota')::date) = (NOW() AT TIME ZONE 'America/Bogota')::date`);
+  }
+  if (regFilter && hasRegCol) {
+    conds.push(`LOWER(COALESCE(p.registered_by_username,'')) = LOWER($${pi})`);
+    params.push(regFilter);
+    pi++;
+  }
+  const where = `WHERE ${conds.join(" AND ")}`;
+  const channelExpr = hasChannelCol ? `COALESCE(p.payment_channel,'cash')` : `'cash'`;
+
+  const sumQ = await pool.query(
+    `SELECT
+       COALESCE(SUM(p.amount_cents), 0)::bigint AS total_cents,
+       COUNT(*)::int AS n,
+       COALESCE(SUM(p.amount_cents) FILTER (WHERE p.payment_type = 'affiliation'), 0)::bigint AS aff_cents,
+       COALESCE(SUM(p.amount_cents) FILTER (WHERE p.payment_type = 'monthly'), 0)::bigint AS mon_cents,
+       COALESCE(SUM(p.amount_cents) FILTER (WHERE ${channelExpr} = 'cash'), 0)::bigint AS cash_cents,
+       COALESCE(SUM(p.amount_cents) FILTER (WHERE ${channelExpr} = 'consignment'), 0)::bigint AS cons_cents,
+       MIN((p.created_at AT TIME ZONE 'America/Bogota')::date)::text AS resolved_date
+     FROM admin_cash_payments p
+     ${where}`,
+    params
+  );
+  const sr = sumQ.rows[0];
+
+  // Si no se pasó date, devolvemos también la fecha real (hoy en Bogotá), aunque no haya movimientos.
+  let resolvedDate = dateFilter || sr.resolved_date;
+  if (!resolvedDate) {
+    const t = await pool.query(
+      `SELECT to_char((NOW() AT TIME ZONE 'America/Bogota')::date, 'YYYY-MM-DD') AS d`
+    );
+    resolvedDate = t.rows[0].d;
+  }
+
+  let byRegistrar = [];
+  if (!isSecretary && hasRegCol) {
+    const brQ = await pool.query(
+      `SELECT
+         COALESCE(p.registered_by_username, '(sin registrar)') AS registrar,
+         COALESCE(SUM(p.amount_cents), 0)::bigint AS total_cents,
+         COUNT(*)::int AS n
+       FROM admin_cash_payments p
+       ${where}
+       GROUP BY COALESCE(p.registered_by_username, '(sin registrar)')
+       ORDER BY total_cents DESC`,
+      params
+    );
+    byRegistrar = brQ.rows.map((r) => ({
+      registrar: r.registrar,
+      totalPesos: Math.round(Number(r.total_cents) / 100),
+      count: Number(r.n),
+    }));
+  }
+
+  const optSel = [
+    hasRegCol ? "p.registered_by_username" : null,
+    hasChannelCol ? "p.payment_channel" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const optSelSql = optSel ? `, ${optSel}` : "";
+  const itemsQ = await pool.query(
+    `SELECT p.id, p.doc_number, p.full_name, p.payment_type, p.amount_cents, p.months_count,
+            p.monthly_paid_through_before, p.monthly_paid_through_after, p.note, p.created_at${optSelSql}
+     FROM admin_cash_payments p
+     ${where}
+     ORDER BY p.created_at ASC`,
+    params
+  );
+  const items = itemsQ.rows.map((row) => ({
+    id: row.id,
+    docNumber: row.doc_number,
+    fullName: row.full_name,
+    paymentType: row.payment_type,
+    amountPesos: Math.round(Number(row.amount_cents) / 100),
+    monthsCount: row.months_count,
+    monthlyPaidThroughBefore: row.monthly_paid_through_before,
+    monthlyPaidThroughAfter: row.monthly_paid_through_after,
+    note: row.note,
+    createdAt: row.created_at,
+    registeredBy: hasRegCol ? row.registered_by_username || null : null,
+    paymentChannel: hasChannelCol
+      ? (row.payment_channel === "consignment" ? "consignment" : "cash")
+      : "cash",
+  }));
+
+  return {
+    scope: isSecretary ? "secretary" : "owner",
+    date: resolvedDate,
+    registrar: regFilter || null,
+    summary: {
+      totalCents: Number(sr.total_cents),
+      totalPesos: Math.round(Number(sr.total_cents) / 100),
+      count: Number(sr.n),
+      affiliationCents: Number(sr.aff_cents),
+      affiliationPesos: Math.round(Number(sr.aff_cents) / 100),
+      monthlyCents: Number(sr.mon_cents),
+      monthlyPesos: Math.round(Number(sr.mon_cents) / 100),
+      cashCents: Number(sr.cash_cents),
+      cashPesos: Math.round(Number(sr.cash_cents) / 100),
+      consignmentCents: Number(sr.cons_cents),
+      consignmentPesos: Math.round(Number(sr.cons_cents) / 100),
+    },
+    byRegistrar,
+    items,
+  };
+}
+
+/** Construye el snapshot del cierre mensual sin guardarlo. */
+async function buildMonthlyClosureData({ month }) {
+  const hasRegCol = await adminCashPaymentsHasRegistrarColumn();
+  const hasChannelCol = await adminCashPaymentsHasChannelColumn();
+  const channelExpr = hasChannelCol ? `COALESCE(p.payment_channel,'cash')` : `'cash'`;
+
+  const sumQ = await pool.query(
+    `SELECT
+       COALESCE(SUM(p.amount_cents), 0)::bigint AS total_cents,
+       COUNT(*)::int AS n,
+       COALESCE(SUM(p.amount_cents) FILTER (WHERE p.payment_type = 'affiliation'), 0)::bigint AS aff_cents,
+       COALESCE(SUM(p.amount_cents) FILTER (WHERE p.payment_type = 'monthly'), 0)::bigint AS mon_cents,
+       COALESCE(SUM(p.amount_cents) FILTER (WHERE ${channelExpr} = 'cash'), 0)::bigint AS cash_cents,
+       COALESCE(SUM(p.amount_cents) FILTER (WHERE ${channelExpr} = 'consignment'), 0)::bigint AS cons_cents
+     FROM admin_cash_payments p
+     WHERE to_char((p.created_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM') = $1`,
+    [month]
+  );
+  const sr = sumQ.rows[0];
+
+  const byDayQ = await pool.query(
+    `SELECT
+       to_char((p.created_at AT TIME ZONE 'America/Bogota')::date, 'YYYY-MM-DD') AS day,
+       COALESCE(SUM(p.amount_cents), 0)::bigint AS total_cents,
+       COUNT(*)::int AS n
+     FROM admin_cash_payments p
+     WHERE to_char((p.created_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM') = $1
+     GROUP BY (p.created_at AT TIME ZONE 'America/Bogota')::date
+     ORDER BY (p.created_at AT TIME ZONE 'America/Bogota')::date ASC`,
+    [month]
+  );
+  const byDay = byDayQ.rows.map((r) => ({
+    day: r.day,
+    totalPesos: Math.round(Number(r.total_cents) / 100),
+    count: Number(r.n),
+  }));
+
+  let byRegistrar = [];
+  if (hasRegCol) {
+    const brQ = await pool.query(
+      `SELECT
+         COALESCE(p.registered_by_username, '(sin registrar)') AS registrar,
+         COALESCE(SUM(p.amount_cents), 0)::bigint AS total_cents,
+         COUNT(*)::int AS n,
+         COALESCE(SUM(p.amount_cents) FILTER (WHERE p.payment_type = 'affiliation'), 0)::bigint AS aff_cents,
+         COALESCE(SUM(p.amount_cents) FILTER (WHERE p.payment_type = 'monthly'), 0)::bigint AS mon_cents
+       FROM admin_cash_payments p
+       WHERE to_char((p.created_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM') = $1
+       GROUP BY COALESCE(p.registered_by_username, '(sin registrar)')
+       ORDER BY total_cents DESC`,
+      [month]
+    );
+    byRegistrar = brQ.rows.map((r) => ({
+      registrar: r.registrar,
+      totalPesos: Math.round(Number(r.total_cents) / 100),
+      count: Number(r.n),
+      affiliationPesos: Math.round(Number(r.aff_cents) / 100),
+      monthlyPesos: Math.round(Number(r.mon_cents) / 100),
+    }));
+  }
+
+  return {
+    month,
+    summary: {
+      totalCents: Number(sr.total_cents),
+      totalPesos: Math.round(Number(sr.total_cents) / 100),
+      count: Number(sr.n),
+      affiliationCents: Number(sr.aff_cents),
+      affiliationPesos: Math.round(Number(sr.aff_cents) / 100),
+      monthlyCents: Number(sr.mon_cents),
+      monthlyPesos: Math.round(Number(sr.mon_cents) / 100),
+      cashCents: Number(sr.cash_cents),
+      cashPesos: Math.round(Number(sr.cash_cents) / 100),
+      consignmentCents: Number(sr.cons_cents),
+      consignmentPesos: Math.round(Number(sr.cons_cents) / 100),
+    },
+    byDay,
+    byRegistrar,
+  };
+}
+
+/**
+ * GET /closures/daily — Vista previa del cierre del día (NO guarda).
+ * - Secretaria: SOLO sus movimientos del día (filtro forzado por su usuario).
+ * - Owner: por defecto todos los movimientos del día. Con ?registrar=USER filtra por uno.
+ */
+router.get("/closures/daily", async (req, res) => {
+  try {
+    const data = await buildDailyClosureData({
+      adminCtx: req.adminCtx,
+      dateRaw: req.query.date,
+      registrarRaw: req.query.registrar,
+    });
+    return res.json(data);
+  } catch (e) {
+    if (e.code === "42P01") {
+      return res.status(503).json({ error: "Ejecuta migrate_admin_cash_payments.sql en la base de datos" });
+    }
+    console.error(e);
+    return res.status(500).json({ error: "Error al generar cierre diario" });
+  }
+});
+
+/**
+ * POST /closures/daily — Genera el cierre del día, lo GUARDA como snapshot
+ * inmutable en cash_closures y devuelve el snapshot completo para mostrar en pantalla.
+ *
+ * - Secretaria: cierre filtrado por su propio usuario (es su cierre personal).
+ * - Owner: cierre global del día (todos los registradores) o filtrado por ?registrar=
+ *
+ * Si ya existe un cierre con la misma combinación (tipo, fecha, registrador):
+ * devuelve 409 con el cierre existente. No se permite cerrar dos veces el mismo día.
+ */
+router.post("/closures/daily", async (req, res) => {
+  try {
+    if (!(await cashClosuresTableExists())) {
+      return res.status(503).json({
+        error: "Ejecuta en Neon: db/migrate_cash_closures.sql para habilitar los cierres guardados.",
+      });
+    }
+    const data = await buildDailyClosureData({
+      adminCtx: req.adminCtx,
+      dateRaw: req.query.date || req.body?.date,
+      registrarRaw: req.query.registrar || req.body?.registrar,
+    });
+    const period = data.date; // YYYY-MM-DD
+    const filterRegistrar = data.registrar || null;
+    const generatedBy = String(req.adminCtx?.username || "").trim();
+    const generatedRole = req.adminCtx?.role || "owner";
+    const closureYear = parseInt(period.slice(0, 4), 10);
+
+    // Verificar existencia previa para devolver el snapshot ya guardado en lugar de fallar.
+    const existing = await pool.query(
+      `SELECT id, snapshot, created_at, consecutive_number
+       FROM cash_closures
+       WHERE closure_type = 'daily' AND period = $1
+         AND COALESCE(filter_registrar, '__GLOBAL__') = COALESCE($2, '__GLOBAL__')
+       LIMIT 1`,
+      [period, filterRegistrar]
+    );
+    if (existing.rowCount > 0) {
+      const row = existing.rows[0];
+      return res.status(409).json({
+        error: "Este día ya tiene un cierre generado. No se puede cerrar dos veces.",
+        existing: {
+          id: row.id,
+          consecutiveNumber: row.consecutive_number,
+          createdAt: row.created_at,
+          ...row.snapshot,
+        },
+      });
+    }
+
+    // Calcular consecutivo del año (por tipo)
+    const consQ = await pool.query(
+      `SELECT COALESCE(MAX(consecutive_number), 0) + 1 AS next
+       FROM cash_closures
+       WHERE closure_type = 'daily' AND closure_year = $1`,
+      [closureYear]
+    );
+    const consecutiveNumber = consQ.rows[0].next;
+
+    const ins = await pool.query(
+      `INSERT INTO cash_closures (
+         closure_type, period, filter_registrar,
+         generated_by_username, generated_by_role,
+         closure_year, consecutive_number,
+         total_cents, movements_count,
+         affiliation_cents, monthly_cents, cash_cents, consignment_cents,
+         snapshot
+       ) VALUES (
+         'daily', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb
+       )
+       RETURNING id, created_at, consecutive_number`,
+      [
+        period,
+        filterRegistrar,
+        generatedBy,
+        generatedRole,
+        closureYear,
+        consecutiveNumber,
+        data.summary.totalCents,
+        data.summary.count,
+        data.summary.affiliationCents,
+        data.summary.monthlyCents,
+        data.summary.cashCents,
+        data.summary.consignmentCents,
+        JSON.stringify(data),
+      ]
+    );
+
+    await logAdminAudit(req, "closures.daily.create", {
+      closureId: ins.rows[0].id,
+      period,
+      filterRegistrar,
+      consecutiveNumber: ins.rows[0].consecutive_number,
+      totalPesos: data.summary.totalPesos,
+      count: data.summary.count,
+    });
+
+    return res.json({
+      id: ins.rows[0].id,
+      consecutiveNumber: ins.rows[0].consecutive_number,
+      createdAt: ins.rows[0].created_at,
+      generatedBy,
+      ...data,
+    });
+  } catch (e) {
+    if (e.code === "42P01") {
+      return res.status(503).json({
+        error: "Ejecuta en Neon: db/migrate_cash_closures.sql para habilitar los cierres guardados.",
+      });
+    }
+    if (e.code === "23505") {
+      return res.status(409).json({ error: "Este día ya tiene un cierre generado. No se puede cerrar dos veces." });
+    }
+    console.error(e);
+    return res.status(500).json({ error: "No se pudo guardar el cierre del día" });
+  }
+});
+
+/**
+ * GET /closures/monthly — Vista previa del cierre mensual (solo owner, NO guarda).
+ */
+router.get("/closures/monthly", requireOwner, async (req, res) => {
+  const monthRaw = String(req.query.month || "").trim();
+  const month = /^\d{4}-\d{2}$/.test(monthRaw) ? monthRaw : null;
+  if (!month) {
+    return res.status(400).json({ error: "Parámetro month requerido en formato YYYY-MM" });
+  }
+  try {
+    const data = await buildMonthlyClosureData({ month });
+    return res.json(data);
+  } catch (e) {
+    if (e.code === "42P01") {
+      return res.status(503).json({ error: "Ejecuta migrate_admin_cash_payments.sql en la base de datos" });
+    }
+    console.error(e);
+    return res.status(500).json({ error: "Error al generar cierre mensual" });
+  }
+});
+
+/**
+ * POST /closures/monthly — Genera y GUARDA el cierre mensual (solo owner).
+ */
+router.post("/closures/monthly", requireOwner, async (req, res) => {
+  const monthRaw = String(req.query.month || req.body?.month || "").trim();
+  const month = /^\d{4}-\d{2}$/.test(monthRaw) ? monthRaw : null;
+  if (!month) {
+    return res.status(400).json({ error: "Parámetro month requerido en formato YYYY-MM" });
+  }
+  try {
+    if (!(await cashClosuresTableExists())) {
+      return res.status(503).json({
+        error: "Ejecuta en Neon: db/migrate_cash_closures.sql para habilitar los cierres guardados.",
+      });
+    }
+    const data = await buildMonthlyClosureData({ month });
+    const generatedBy = String(req.adminCtx?.username || "").trim();
+    const generatedRole = req.adminCtx?.role || "owner";
+    const closureYear = parseInt(month.slice(0, 4), 10);
+
+    const existing = await pool.query(
+      `SELECT id, snapshot, created_at, consecutive_number
+       FROM cash_closures
+       WHERE closure_type = 'monthly' AND period = $1
+         AND COALESCE(filter_registrar, '__GLOBAL__') = '__GLOBAL__'
+       LIMIT 1`,
+      [month]
+    );
+    if (existing.rowCount > 0) {
+      const row = existing.rows[0];
+      return res.status(409).json({
+        error: "Este mes ya tiene un cierre generado. No se puede cerrar dos veces.",
+        existing: {
+          id: row.id,
+          consecutiveNumber: row.consecutive_number,
+          createdAt: row.created_at,
+          ...row.snapshot,
+        },
+      });
+    }
+
+    const consQ = await pool.query(
+      `SELECT COALESCE(MAX(consecutive_number), 0) + 1 AS next
+       FROM cash_closures
+       WHERE closure_type = 'monthly' AND closure_year = $1`,
+      [closureYear]
+    );
+    const consecutiveNumber = consQ.rows[0].next;
+
+    const ins = await pool.query(
+      `INSERT INTO cash_closures (
+         closure_type, period, filter_registrar,
+         generated_by_username, generated_by_role,
+         closure_year, consecutive_number,
+         total_cents, movements_count,
+         affiliation_cents, monthly_cents, cash_cents, consignment_cents,
+         snapshot
+       ) VALUES (
+         'monthly', $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb
+       )
+       RETURNING id, created_at, consecutive_number`,
+      [
+        month,
+        generatedBy,
+        generatedRole,
+        closureYear,
+        consecutiveNumber,
+        data.summary.totalCents,
+        data.summary.count,
+        data.summary.affiliationCents,
+        data.summary.monthlyCents,
+        data.summary.cashCents,
+        data.summary.consignmentCents,
+        JSON.stringify(data),
+      ]
+    );
+
+    await logAdminAudit(req, "closures.monthly.create", {
+      closureId: ins.rows[0].id,
+      period: month,
+      consecutiveNumber: ins.rows[0].consecutive_number,
+      totalPesos: data.summary.totalPesos,
+      count: data.summary.count,
+    });
+
+    return res.json({
+      id: ins.rows[0].id,
+      consecutiveNumber: ins.rows[0].consecutive_number,
+      createdAt: ins.rows[0].created_at,
+      generatedBy,
+      ...data,
+    });
+  } catch (e) {
+    if (e.code === "42P01") {
+      return res.status(503).json({
+        error: "Ejecuta en Neon: db/migrate_cash_closures.sql para habilitar los cierres guardados.",
+      });
+    }
+    if (e.code === "23505") {
+      return res.status(409).json({ error: "Este mes ya tiene un cierre generado." });
+    }
+    console.error(e);
+    return res.status(500).json({ error: "No se pudo guardar el cierre del mes" });
+  }
+});
+
+/**
+ * GET /closures — Listado de cierres guardados.
+ * - Secretaria: solo ve sus propios cierres diarios (filter_registrar = su usuario).
+ * - Owner: ve todos.
+ * Filtros: ?type=daily|monthly, ?from=YYYY-MM-DD, ?to=YYYY-MM-DD, ?registrar=USER, ?limit=N
+ */
+router.get("/closures", async (req, res) => {
+  try {
+    if (!(await cashClosuresTableExists())) {
+      return res.json({ items: [] });
+    }
+    const isSecretary = req.adminCtx?.role === "secretary";
+    const typeRaw = String(req.query.type || "").trim().toLowerCase();
+    const type = ["daily", "monthly"].includes(typeRaw) ? typeRaw : null;
+    const fromRaw = String(req.query.from || "").trim();
+    const toRaw = String(req.query.to || "").trim();
+    const registrarRaw = String(req.query.registrar || "").trim();
+    const limRaw = parseInt(String(req.query.limit || "60"), 10);
+    const limit = Number.isFinite(limRaw) ? Math.min(200, Math.max(1, limRaw)) : 60;
+
+    const conds = [];
+    const params = [];
+    let pi = 1;
+    if (type) {
+      conds.push(`closure_type = $${pi}`);
+      params.push(type);
+      pi++;
+    }
+    if (fromRaw) {
+      conds.push(`period >= $${pi}`);
+      params.push(fromRaw);
+      pi++;
+    }
+    if (toRaw) {
+      conds.push(`period <= $${pi}`);
+      params.push(toRaw);
+      pi++;
+    }
+    if (isSecretary) {
+      // La secretaria solo ve sus cierres diarios.
+      conds.push(`closure_type = 'daily'`);
+      conds.push(`LOWER(COALESCE(filter_registrar,'')) = LOWER($${pi})`);
+      params.push(String(req.adminCtx?.username || "").trim());
+      pi++;
+    } else if (registrarRaw) {
+      conds.push(`LOWER(COALESCE(filter_registrar,'')) = LOWER($${pi})`);
+      params.push(normalizeAdminBody(registrarRaw));
+      pi++;
+    }
+    const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+
+    params.push(limit);
+    const r = await pool.query(
+      `SELECT id, closure_type, period, filter_registrar, generated_by_username, generated_by_role,
+              closure_year, consecutive_number, total_cents, movements_count,
+              affiliation_cents, monthly_cents, cash_cents, consignment_cents, created_at
+       FROM cash_closures
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT $${pi}::int`,
+      params
+    );
+    const items = r.rows.map((row) => ({
+      id: row.id,
+      closureType: row.closure_type,
+      period: row.period,
+      filterRegistrar: row.filter_registrar,
+      generatedByUsername: row.generated_by_username,
+      generatedByRole: row.generated_by_role,
+      closureYear: row.closure_year,
+      consecutiveNumber: row.consecutive_number,
+      totalPesos: Math.round(Number(row.total_cents) / 100),
+      movementsCount: row.movements_count,
+      affiliationPesos: Math.round(Number(row.affiliation_cents) / 100),
+      monthlyPesos: Math.round(Number(row.monthly_cents) / 100),
+      cashPesos: Math.round(Number(row.cash_cents) / 100),
+      consignmentPesos: Math.round(Number(row.consignment_cents) / 100),
+      createdAt: row.created_at,
+    }));
+    return res.json({ items });
+  } catch (e) {
+    if (e.code === "42P01") return res.json({ items: [] });
+    console.error(e);
+    return res.status(500).json({ error: "Error al listar cierres" });
+  }
+});
+
+/**
+ * GET /closures/:id — Detalle completo (snapshot) de un cierre guardado.
+ * Se usa para volver a mostrar el cierre en pantalla y para imprimir/PDF.
+ * - Secretaria: solo puede ver sus propios cierres.
+ * - Owner: puede ver cualquiera.
+ */
+router.get("/closures/:id", async (req, res) => {
+  const id = String(req.params.id || "").trim();
+  if (!/^[0-9a-fA-F-]{36}$/.test(id)) {
+    return res.status(400).json({ error: "ID de cierre inválido" });
+  }
+  try {
+    if (!(await cashClosuresTableExists())) {
+      return res.status(404).json({ error: "Cierre no encontrado" });
+    }
+    const r = await pool.query(
+      `SELECT id, closure_type, period, filter_registrar, generated_by_username, generated_by_role,
+              closure_year, consecutive_number, snapshot, created_at
+       FROM cash_closures WHERE id = $1::uuid LIMIT 1`,
+      [id]
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ error: "Cierre no encontrado" });
+    }
+    const row = r.rows[0];
+    const isSecretary = req.adminCtx?.role === "secretary";
+    if (isSecretary) {
+      const myUser = String(req.adminCtx?.username || "").trim().toLowerCase();
+      const filtUser = String(row.filter_registrar || "").trim().toLowerCase();
+      if (row.closure_type !== "daily" || filtUser !== myUser) {
+        return res.status(403).json({ error: "Solo puedes consultar tus propios cierres." });
+      }
+    }
+    return res.json({
+      id: row.id,
+      closureType: row.closure_type,
+      period: row.period,
+      filterRegistrar: row.filter_registrar,
+      generatedByUsername: row.generated_by_username,
+      generatedByRole: row.generated_by_role,
+      closureYear: row.closure_year,
+      consecutiveNumber: row.consecutive_number,
+      createdAt: row.created_at,
+      snapshot: row.snapshot,
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Error al cargar cierre" });
   }
 });
 
